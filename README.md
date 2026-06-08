@@ -1,6 +1,6 @@
 # MomoDesk
 
-MomoDesk is a lightweight desktop pet prototype for a cat companion. The first implementation focuses on a small transparent Tauri window, a Canvas-rendered placeholder cat, basic autonomous behavior, and pointer interaction.
+MomoDesk is a lightweight desktop pet prototype for a personal cat companion. The first implementation focuses on a small transparent Tauri window, a Canvas-rendered placeholder cat, basic autonomous behavior, and pointer interaction.
 
 ## Current Scope
 
@@ -27,7 +27,8 @@ npm run tauri dev
 
 The placeholder cat should later be replaced by AI-generated assets:
 
-1. Use `gpt-image-2` to generate the consistent cat design sheet and static poses.
-2. Use `seedance2.0` to generate short action videos.
-3. Extract frames, clean transparency, align foot anchors, and pack sprite sheets.
-4. Register animations in `assets/pets/default/pet.json`.
+1. Upload clear photos of the user's own cat as the visual prototype.
+2. Use `gpt-image-2` to turn those references into a consistent character sheet and static poses.
+3. Use `seedance2.0` to generate short action videos based on that character sheet.
+4. Extract frames, clean transparency, align foot anchors, and pack sprite sheets.
+5. Register animations in `assets/pets/default/pet.json`.

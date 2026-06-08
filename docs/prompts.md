@@ -1,9 +1,9 @@
 # AI Asset Prompts
 
-## Character Sheet
+## Personal Cat Character Sheet
 
 ```text
-A cute desktop pet cat character design sheet, orange and white fur, round bright eyes, fluffy tail, soft expressive face, clean line art, gentle cel shading. Show the same cat in front view, left side view, right side view, back view, and three-quarter view. Transparent background, consistent proportions, suitable for 2D sprite animation.
+Use the uploaded photos of my real cat as the strict visual reference. Create a cute desktop pet cat character design sheet that preserves the cat's fur pattern, eye color, ear shape, tail shape, body proportions, and any distinctive markings. Show the same cat in front view, left side view, right side view, back view, and three-quarter view. Clean line art, gentle cel shading, transparent background, consistent proportions, suitable for 2D sprite animation.
 ```
 
 ## Idle Animation
