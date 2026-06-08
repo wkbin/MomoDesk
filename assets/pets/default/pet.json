@@ -1,0 +1,29 @@
+{
+  "id": "default_cat",
+  "name": "Momo",
+  "version": 1,
+  "frameWidth": 256,
+  "frameHeight": 256,
+  "anchor": {
+    "x": 0.5,
+    "y": 0.92
+  },
+  "scale": 0.65,
+  "animations": {
+    "idle": {
+      "fps": 8,
+      "loop": true,
+      "frames": []
+    },
+    "walk": {
+      "fps": 12,
+      "loop": true,
+      "frames": []
+    },
+    "sleep": {
+      "fps": 4,
+      "loop": true,
+      "frames": []
+    }
+  }
+}
