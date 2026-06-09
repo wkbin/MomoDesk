@@ -69,6 +69,9 @@ export class CanvasPetRenderer {
       this.drawBody(pet);
       this.drawHead(pet, now);
       this.drawLegs(pet, now);
+      if (pet.state === "eat") {
+        this.drawFood(now);
+      }
     }
 
     this.ctx.restore();
@@ -280,6 +283,26 @@ export class CanvasPetRenderer {
     ctx.fillText("Z", 142, 72 + float);
     ctx.font = "700 12px system-ui, sans-serif";
     ctx.fillText("Z", 160, 54 - float);
+  }
+
+  private drawFood(now: number): void {
+    const ctx = this.ctx;
+    const chew = Math.sin(now / 120) * 1.5;
+
+    ctx.save();
+    ctx.translate(33, -5 + chew);
+    ctx.fillStyle = "#78a85a";
+    ctx.beginPath();
+    ctx.roundRect(-17, 1, 34, 13, 6);
+    ctx.fill();
+
+    ctx.fillStyle = "#f4d77a";
+    for (let i = 0; i < 4; i += 1) {
+      ctx.beginPath();
+      ctx.arc(-10 + i * 7, 2 + Math.sin(now / 160 + i) * 1.2, 2.4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
   }
 
   private roundPaw(x: number, y: number, width: number, height: number): void {

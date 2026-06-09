@@ -72,6 +72,18 @@ export class BehaviorEngine {
     this.setState(pet, next);
   }
 
+  feed(pet: PetModel): void {
+    this.setState(pet, "eat");
+  }
+
+  sleep(pet: PetModel): void {
+    this.restorePosition(pet, {
+      x: pet.position.x,
+      y: this.bounds.floorY
+    });
+    this.setState(pet, "sleep");
+  }
+
   private updatePassiveState(pet: PetModel, deltaMs: number): void {
     pet.nextDecisionMs -= deltaMs;
 
@@ -158,6 +170,10 @@ export class BehaviorEngine {
 
     if (pet.state === "groom") {
       return pet.stateElapsedMs > 1800;
+    }
+
+    if (pet.state === "eat") {
+      return pet.stateElapsedMs > 2200;
     }
 
     return false;

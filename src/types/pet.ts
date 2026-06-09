@@ -5,6 +5,7 @@ export type PetState =
   | "sleep"
   | "stretch"
   | "groom"
+  | "eat"
   | "drag"
   | "fall";
 

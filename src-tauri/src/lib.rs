@@ -119,12 +119,20 @@ fn read_json<T: serde::de::DeserializeOwned>(
 fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let recall_item = MenuItem::with_id(app, "recall", "Recall Momo", true, None::<&str>)?;
     let feed_item = MenuItem::with_id(app, "feed", "Feed Momo", true, None::<&str>)?;
+    let sleep_item = MenuItem::with_id(app, "sleep", "Sleep Momo", true, None::<&str>)?;
     let show_item = MenuItem::with_id(app, "show", "Show Momo", true, None::<&str>)?;
     let hide_item = MenuItem::with_id(app, "hide", "Hide Momo", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
-        &[&recall_item, &feed_item, &show_item, &hide_item, &quit_item],
+        &[
+            &recall_item,
+            &feed_item,
+            &sleep_item,
+            &show_item,
+            &hide_item,
+            &quit_item,
+        ],
     )?;
 
     let mut tray = TrayIconBuilder::new()
@@ -149,6 +157,13 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
                 let _ = window.show();
                 let _ = window.set_focus();
                 let _ = window.emit("tray-feed", ());
+            }
+        }
+        "sleep" => {
+            if let Some(window) = app.get_webview_window("pet") {
+                let _ = window.show();
+                let _ = window.set_focus();
+                let _ = window.emit("tray-sleep", ());
             }
         }
         "show" => {

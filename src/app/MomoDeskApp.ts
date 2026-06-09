@@ -24,6 +24,7 @@ const RESTORABLE_STATES = new Set<PetState>([
   "sleep",
   "stretch",
   "groom",
+  "eat",
   "drag",
   "fall"
 ]);
@@ -159,7 +160,12 @@ export class MomoDeskApp {
     });
 
     void window.listen("tray-feed", () => {
-      this.behavior.nudgeInteraction(this.pet);
+      this.behavior.feed(this.pet);
+      void this.savePetState();
+    });
+
+    void window.listen("tray-sleep", () => {
+      this.behavior.sleep(this.pet);
       void this.savePetState();
     });
   }
