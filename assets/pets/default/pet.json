@@ -13,17 +13,68 @@
     "idle": {
       "fps": 8,
       "loop": true,
-      "frames": []
+      "source": "actions/idle/source/idle.mp4",
+      "frames": "actions/idle/frames/idle_*.png"
     },
-    "walk": {
+    "walk_left": {
       "fps": 12,
       "loop": true,
-      "frames": []
+      "source": "actions/walk_left/source/walk_left.mp4",
+      "frames": "actions/walk_left/frames/walk_left_*.png"
+    },
+    "walk_right": {
+      "fps": 12,
+      "loop": true,
+      "source": "actions/walk_right/source/walk_right.mp4",
+      "frames": "actions/walk_right/frames/walk_right_*.png"
+    },
+    "sit": {
+      "fps": 10,
+      "loop": false,
+      "source": "actions/sit/source/sit.mp4",
+      "frames": "actions/sit/frames/sit_*.png"
+    },
+    "sit_idle": {
+      "fps": 6,
+      "loop": true,
+      "source": "actions/sit_idle/source/sit_idle.mp4",
+      "frames": "actions/sit_idle/frames/sit_idle_*.png"
     },
     "sleep": {
       "fps": 4,
       "loop": true,
-      "frames": []
+      "source": "actions/sleep/source/sleep.mp4",
+      "frames": "actions/sleep/frames/sleep_*.png"
+    },
+    "stretch": {
+      "fps": 12,
+      "loop": false,
+      "source": "actions/stretch/source/stretch.mp4",
+      "frames": "actions/stretch/frames/stretch_*.png"
+    },
+    "groom": {
+      "fps": 10,
+      "loop": true,
+      "source": "actions/groom/source/groom.mp4",
+      "frames": "actions/groom/frames/groom_*.png"
+    },
+    "drag": {
+      "fps": 8,
+      "loop": true,
+      "source": "actions/drag/source/drag.mp4",
+      "frames": "actions/drag/frames/drag_*.png"
+    },
+    "fall": {
+      "fps": 12,
+      "loop": false,
+      "source": "actions/fall/source/fall.mp4",
+      "frames": "actions/fall/frames/fall_*.png"
+    },
+    "eat": {
+      "fps": 10,
+      "loop": false,
+      "source": "actions/eat/source/eat.mp4",
+      "frames": "actions/eat/frames/eat_*.png"
     }
   }
 }

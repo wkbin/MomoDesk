@@ -10,3 +10,5 @@ Thumbs.db
 !.env.example
 assets/references/*
 !assets/references/README.md
+assets/pets/*/actions/*/source/*
+!assets/pets/*/actions/*/source/.gitkeep

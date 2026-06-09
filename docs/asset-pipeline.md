@@ -14,6 +14,8 @@ MomoDesk starts with a Canvas placeholder cat. Production assets should be based
 8. Pack frames into a sprite sheet.
 9. Register animation metadata in `assets/pets/default/pet.json`.
 
+See `docs/action-assets.md` for the exact action directory names, file formats, metadata schema, and atlas output location.
+
 ## Reference Photo Checklist
 
 Use 8-15 photos if possible:

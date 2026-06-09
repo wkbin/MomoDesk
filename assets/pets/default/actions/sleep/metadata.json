@@ -1,0 +1,14 @@
+{
+  "action": "sleep",
+  "displayName": "Sleep",
+  "fps": 4,
+  "loop": true,
+  "frameWidth": 256,
+  "frameHeight": 256,
+  "anchor": { "x": 0.5, "y": 0.92 },
+  "source": "source/sleep.mp4",
+  "frames": "frames/sleep_*.png",
+  "preview": "preview/sleep.webp",
+  "required": true,
+  "notes": "Curled or lying sleeping loop with slow breathing."
+}

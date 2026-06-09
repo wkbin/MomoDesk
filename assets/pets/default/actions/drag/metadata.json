@@ -1,0 +1,14 @@
+{
+  "action": "drag",
+  "displayName": "Dragged",
+  "fps": 8,
+  "loop": true,
+  "frameWidth": 256,
+  "frameHeight": 256,
+  "anchor": { "x": 0.5, "y": 0.92 },
+  "source": "source/drag.mp4",
+  "frames": "frames/drag_*.png",
+  "preview": "preview/drag.webp",
+  "required": true,
+  "notes": "Held pose while the user drags the cat."
+}

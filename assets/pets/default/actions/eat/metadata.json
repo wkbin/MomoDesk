@@ -1,0 +1,14 @@
+{
+  "action": "eat",
+  "displayName": "Eat",
+  "fps": 10,
+  "loop": false,
+  "frameWidth": 256,
+  "frameHeight": 256,
+  "anchor": { "x": 0.5, "y": 0.92 },
+  "source": "source/eat.mp4",
+  "frames": "frames/eat_*.png",
+  "preview": "preview/eat.webp",
+  "required": false,
+  "notes": "Triggered by feed command. Prop-free eating motion is preferred for MVP."
+}

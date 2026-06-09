@@ -1,0 +1,14 @@
+{
+  "action": "groom",
+  "displayName": "Groom",
+  "fps": 10,
+  "loop": true,
+  "frameWidth": 256,
+  "frameHeight": 256,
+  "anchor": { "x": 0.5, "y": 0.92 },
+  "source": "source/groom.mp4",
+  "frames": "frames/groom_*.png",
+  "preview": "preview/groom.webp",
+  "required": false,
+  "notes": "Licking paw or fur. Loop should be able to end cleanly."
+}

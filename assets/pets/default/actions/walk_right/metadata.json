@@ -1,0 +1,14 @@
+{
+  "action": "walk_right",
+  "displayName": "Walk right",
+  "fps": 12,
+  "loop": true,
+  "frameWidth": 256,
+  "frameHeight": 256,
+  "anchor": { "x": 0.5, "y": 0.92 },
+  "source": "source/walk_right.mp4",
+  "frames": "frames/walk_right_*.png",
+  "preview": "preview/walk_right.webp",
+  "required": true,
+  "notes": "Can be generated directly or mirrored from walk_left if markings still look correct."
+}

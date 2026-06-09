@@ -1,0 +1,14 @@
+{
+  "action": "walk_left",
+  "displayName": "Walk left",
+  "fps": 12,
+  "loop": true,
+  "frameWidth": 256,
+  "frameHeight": 256,
+  "anchor": { "x": 0.5, "y": 0.92 },
+  "source": "source/walk_left.mp4",
+  "frames": "frames/walk_left_*.png",
+  "preview": "preview/walk_left.webp",
+  "required": true,
+  "notes": "Side-view walking loop with stable paw contact."
+}

@@ -1,0 +1,14 @@
+{
+  "action": "idle",
+  "displayName": "Idle breathing",
+  "fps": 8,
+  "loop": true,
+  "frameWidth": 256,
+  "frameHeight": 256,
+  "anchor": { "x": 0.5, "y": 0.92 },
+  "source": "source/idle.mp4",
+  "frames": "frames/idle_*.png",
+  "preview": "preview/idle.webp",
+  "required": true,
+  "notes": "Subtle breathing loop with small tail movement."
+}

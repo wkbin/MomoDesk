@@ -1,0 +1,14 @@
+{
+  "action": "stretch",
+  "displayName": "Stretch",
+  "fps": 12,
+  "loop": false,
+  "frameWidth": 256,
+  "frameHeight": 256,
+  "anchor": { "x": 0.5, "y": 0.92 },
+  "source": "source/stretch.mp4",
+  "frames": "frames/stretch_*.png",
+  "preview": "preview/stretch.webp",
+  "required": false,
+  "notes": "One-shot stretch animation triggered by idle behavior or click."
+}

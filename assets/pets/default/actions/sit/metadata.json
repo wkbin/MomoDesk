@@ -1,0 +1,14 @@
+{
+  "action": "sit",
+  "displayName": "Sit transition",
+  "fps": 10,
+  "loop": false,
+  "frameWidth": 256,
+  "frameHeight": 256,
+  "anchor": { "x": 0.5, "y": 0.92 },
+  "source": "source/sit.mp4",
+  "frames": "frames/sit_*.png",
+  "preview": "preview/sit.webp",
+  "required": true,
+  "notes": "One-shot transition from standing to sitting."
+}

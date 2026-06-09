@@ -1,0 +1,14 @@
+{
+  "action": "sit_idle",
+  "displayName": "Sitting idle",
+  "fps": 6,
+  "loop": true,
+  "frameWidth": 256,
+  "frameHeight": 256,
+  "anchor": { "x": 0.5, "y": 0.92 },
+  "source": "source/sit_idle.mp4",
+  "frames": "frames/sit_idle_*.png",
+  "preview": "preview/sit_idle.webp",
+  "required": true,
+  "notes": "Calm sitting loop with gentle breathing."
+}

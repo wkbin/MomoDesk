@@ -32,3 +32,5 @@ The placeholder cat should later be replaced by AI-generated assets:
 3. Use `seedance2.0` to generate short action videos based on that character sheet.
 4. Extract frames, clean transparency, align foot anchors, and pack sprite sheets.
 5. Register animations in `assets/pets/default/pet.json`.
+
+Action source videos and extracted frames should be organized under `assets/pets/default/actions/`. See `docs/action-assets.md` for the folder contract and required formats.
