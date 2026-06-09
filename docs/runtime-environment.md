@@ -36,9 +36,14 @@ Current local validation has confirmed:
 ```text
 npm install
 npm run build
+cargo check
 ```
 
-`npm run tauri dev` requires Rust/Cargo to be installed and available in `PATH`.
+`npm run tauri dev` requires Rust/Cargo and the MSVC linker to be available. If `where link` does not work in a normal terminal, run Tauri commands from a Visual Studio Developer PowerShell/Command Prompt, or initialize the environment first:
+
+```powershell
+cmd /c "call ""C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"" && cargo check"
+```
 
 ## Development Commands
 
