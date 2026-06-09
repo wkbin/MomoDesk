@@ -114,6 +114,27 @@
 | 离线可用 | 所有核心功能不依赖网络 |
 | 资源可扩展 | 新动作通过 JSON 配置接入 |
 
+### 5.1 运行环境
+
+本项目是本地桌面应用，不需要服务器后端、数据库、账号系统或云服务。
+
+用户运行环境：
+
+- Windows 10 21H2+ 或 Windows 11。
+- Microsoft Edge WebView2 Runtime，通常 Windows 10/11 已预装。
+- 安装包或可执行文件本身即可运行。
+- 用户不需要安装 Node.js、Rust、Cargo、npm 或 AI 生成工具。
+
+开发/构建环境：
+
+- Node.js 22 LTS+ 或当前稳定版。
+- npm。
+- Rust stable toolchain 与 Cargo。
+- Windows 下的 Microsoft C++ Build Tools。
+- Git。
+
+更完整的运行环境、开发环境和素材生产环境说明见 `docs/runtime-environment.md`。
+
 ## 6. 技术选型
 
 ### 6.1 推荐方案：Tauri 2 + TypeScript + PixiJS
