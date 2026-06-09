@@ -86,9 +86,12 @@ export class PointerController {
 
   private getCanvasPoint(event: PointerEvent): Vec2 {
     const rect = this.canvas.getBoundingClientRect();
+    const ratio = window.devicePixelRatio || 1;
+    const logicalWidth = this.canvas.width / ratio;
+    const logicalHeight = this.canvas.height / ratio;
     return {
-      x: (event.clientX - rect.left) * (this.canvas.width / rect.width),
-      y: (event.clientY - rect.top) * (this.canvas.height / rect.height)
+      x: (event.clientX - rect.left) * (logicalWidth / rect.width),
+      y: (event.clientY - rect.top) * (logicalHeight / rect.height)
     };
   }
 

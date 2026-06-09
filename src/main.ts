@@ -8,4 +8,4 @@ if (!canvas) {
 }
 
 const app = new MomoDeskApp(canvas);
-app.start();
+void app.start();

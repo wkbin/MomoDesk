@@ -15,6 +15,21 @@ export interface Vec2 {
   y: number;
 }
 
+export interface Settings {
+  autostart: boolean;
+  soundEnabled: boolean;
+  activeLevel: string;
+  scale: number;
+  alwaysOnTop: boolean;
+  skinId: string;
+}
+
+export interface PetPersistState {
+  position: Vec2;
+  lastState: PetState;
+  lastActiveAt: string;
+}
+
 export interface PetModel {
   state: PetState;
   facing: Facing;

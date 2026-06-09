@@ -11,7 +11,11 @@ const GRAVITY = 1500;
 const LANDING_DAMPING = 0.35;
 
 export class BehaviorEngine {
-  constructor(private readonly bounds: Bounds) {}
+  constructor(private bounds: Bounds) {}
+
+  setBounds(bounds: Bounds): void {
+    this.bounds = bounds;
+  }
 
   update(pet: PetModel, deltaMs: number): void {
     pet.stateElapsedMs += deltaMs;
@@ -40,6 +44,18 @@ export class BehaviorEngine {
     pet.stateElapsedMs = 0;
     pet.nextDecisionMs = this.randomDecisionDelay(state);
     pet.velocity = { x: 0, y: 0 };
+  }
+
+  restorePosition(pet: PetModel, position: Vec2): void {
+    const x = this.clamp(position.x, 46, this.bounds.width - 46);
+    const y = this.clamp(position.y, 0, this.bounds.floorY);
+    pet.position = { x, y };
+    pet.target = { x, y: this.bounds.floorY };
+    pet.velocity = { x: 0, y: 0 };
+  }
+
+  getPosition(pet: PetModel): Vec2 {
+    return { ...pet.position };
   }
 
   beginDrag(pet: PetModel): void {

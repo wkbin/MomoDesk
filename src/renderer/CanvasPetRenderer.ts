@@ -21,14 +21,14 @@ export class CanvasPetRenderer {
     this.ctx = ctx;
   }
 
-  resize(width: number, height: number): void {
+  resize(width: number, height: number, displayWidth = width, displayHeight = height): void {
     const ratio = window.devicePixelRatio || 1;
     this.width = width;
     this.height = height;
     this.canvas.width = Math.round(width * ratio);
     this.canvas.height = Math.round(height * ratio);
-    this.canvas.style.width = `${width}px`;
-    this.canvas.style.height = `${height}px`;
+    this.canvas.style.width = `${displayWidth}px`;
+    this.canvas.style.height = `${displayHeight}px`;
     this.ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
   }
 
