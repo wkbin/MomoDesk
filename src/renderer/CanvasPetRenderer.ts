@@ -9,6 +9,8 @@ const STRIPE = "#a84d2b";
 
 export class CanvasPetRenderer {
   private ctx: CanvasRenderingContext2D;
+  private staticImage: HTMLImageElement | null = null;
+  private staticImageLoaded = false;
   private width = 0;
   private height = 0;
 
@@ -19,6 +21,27 @@ export class CanvasPetRenderer {
     }
 
     this.ctx = ctx;
+  }
+
+  setStaticImage(src: string | null): void {
+    this.staticImage = null;
+    this.staticImageLoaded = false;
+
+    if (!src) {
+      return;
+    }
+
+    const image = new Image();
+    image.onload = () => {
+      this.staticImageLoaded = true;
+    };
+    image.onerror = () => {
+      console.warn("Failed to load static pet image", src);
+      this.staticImage = null;
+      this.staticImageLoaded = false;
+    };
+    image.src = src;
+    this.staticImage = image;
   }
 
   resize(width: number, height: number, displayWidth = width, displayHeight = height): void {
@@ -38,7 +61,11 @@ export class CanvasPetRenderer {
     this.ctx.save();
     this.ctx.translate(pet.position.x, pet.position.y);
     this.ctx.scale(pet.facing === "left" ? -1 : 1, 1);
-    this.drawCat(pet, now);
+    if (this.staticImage && this.staticImageLoaded) {
+      this.drawStaticCat(pet, now);
+    } else {
+      this.drawCat(pet, now);
+    }
     this.ctx.restore();
   }
 
@@ -75,6 +102,39 @@ export class CanvasPetRenderer {
     }
 
     this.ctx.restore();
+
+    if (pet.state === "sleep") {
+      this.drawZzz(now);
+    }
+  }
+
+  private drawStaticCat(pet: PetModel, now: number): void {
+    const ctx = this.ctx;
+    const bob = this.getBob(pet, now);
+    const scale = pet.state === "sleep" ? 0.74 : 0.8;
+    const imageSize = 170 * scale;
+    const anchorX = imageSize * 0.5;
+    const anchorY = imageSize * 0.92;
+    const yOffset = pet.state === "sleep" ? 14 : 0;
+
+    ctx.save();
+    ctx.translate(0, bob + yOffset);
+    if (pet.state === "sleep") {
+      ctx.rotate(-0.08);
+    }
+
+    ctx.drawImage(
+      this.staticImage!,
+      -anchorX,
+      -anchorY,
+      imageSize,
+      imageSize
+    );
+
+    if (pet.state === "eat") {
+      this.drawFood(now);
+    }
+    ctx.restore();
 
     if (pet.state === "sleep") {
       this.drawZzz(now);

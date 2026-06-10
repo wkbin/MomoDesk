@@ -10,6 +10,10 @@ import type { PetPackageManifest } from "../types/pet-package";
 const INITIAL_SIZE = 220;
 const SAVE_INTERVAL_MS = 5000;
 const TAURI_AVAILABLE = "__TAURI_INTERNALS__" in window;
+const DEFAULT_STATIC_IMAGE_URL = new URL(
+  "../../assets/pets/default/preview/cat_static.png",
+  import.meta.url
+).href;
 
 const DEFAULT_SETTINGS: Settings = {
   autostart: false,
@@ -143,6 +147,10 @@ export class MomoDeskApp {
 
     document.title = `${this.petPackage.name} - MomoDesk`;
     this.canvas.dataset.petPackage = this.petPackage.id;
+
+    if (this.petPackage.preview?.staticImage) {
+      this.renderer.setStaticImage(DEFAULT_STATIC_IMAGE_URL);
+    }
   }
 
   private async savePetState(): Promise<void> {

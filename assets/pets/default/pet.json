@@ -16,6 +16,9 @@
     "image": "atlas/cat_spritesheet.png",
     "data": "atlas/cat.atlas.json"
   },
+  "preview": {
+    "staticImage": "preview/cat_static.png"
+  },
   "behavior": {
     "defaultState": "idle",
     "dragState": "drag",

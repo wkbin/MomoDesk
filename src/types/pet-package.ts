@@ -37,6 +37,10 @@ export interface PetPackageAtlas {
   data: string;
 }
 
+export interface PetPackagePreview {
+  staticImage?: string;
+}
+
 export interface PetPackageManifest {
   schemaVersion: 1;
   id: string;
@@ -49,6 +53,7 @@ export interface PetPackageManifest {
   anchor: PetPackageAnchor;
   scale: number;
   atlas?: PetPackageAtlas;
+  preview?: PetPackagePreview;
   behavior: PetPackageBehavior;
   animations: Record<AnimationKey, PetPackageAnimation>;
 }
