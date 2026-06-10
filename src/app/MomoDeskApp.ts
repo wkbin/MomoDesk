@@ -1,9 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
 import { BehaviorEngine } from "../core/BehaviorEngine";
+import { PetPackageLoader } from "../pet-package/PetPackageLoader";
 import { CanvasPetRenderer } from "../renderer/CanvasPetRenderer";
 import { PointerController } from "../interaction/PointerController";
 import type { PetModel, PetPersistState, PetState, Settings } from "../types/pet";
+import type { PetPackageManifest } from "../types/pet-package";
 
 const INITIAL_SIZE = 220;
 const SAVE_INTERVAL_MS = 5000;
@@ -33,7 +35,9 @@ export class MomoDeskApp {
   private readonly renderer: CanvasPetRenderer;
   private readonly behavior: BehaviorEngine;
   private readonly pointer: PointerController;
+  private readonly packageLoader = new PetPackageLoader();
   private readonly pet: PetModel;
+  private petPackage: PetPackageManifest | null = null;
   private settings: Settings = DEFAULT_SETTINGS;
   private lastFrame = performance.now();
   private lastSavedState: PetState;
@@ -65,8 +69,10 @@ export class MomoDeskApp {
   }
 
   async start(): Promise<void> {
+    this.petPackage = await this.packageLoader.loadDefault();
     await this.loadPersistedState();
     await this.applySettings();
+    this.applyPetPackage();
 
     window.addEventListener("resize", () => this.resize());
     this.attachTrayEvents();
@@ -128,6 +134,15 @@ export class MomoDeskApp {
     await this.tryTauri(() =>
       window.setSize(new LogicalSize(this.getScaledSize(), this.getScaledSize()))
     );
+  }
+
+  private applyPetPackage(): void {
+    if (!this.petPackage) {
+      return;
+    }
+
+    document.title = `${this.petPackage.name} - MomoDesk`;
+    this.canvas.dataset.petPackage = this.petPackage.id;
   }
 
   private async savePetState(): Promise<void> {

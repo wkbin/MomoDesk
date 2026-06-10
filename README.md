@@ -36,3 +36,5 @@ The placeholder cat should later be replaced by AI-generated assets:
 5. Register animations in `assets/pets/default/pet.json`.
 
 Action source videos and extracted frames should be organized under `assets/pets/default/actions/`. See `docs/action-assets.md` for the folder contract and required formats.
+
+Pet packages are manifest-driven through `pet.json`. See `docs/pet-package.md` for the package schema and outfit strategy.

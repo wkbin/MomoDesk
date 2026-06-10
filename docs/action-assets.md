@@ -1,6 +1,6 @@
 # Cat Action Asset Directory Spec
 
-This document defines where each MomoDesk cat action asset should live and which formats are expected.
+This document defines where each MomoDesk cat action asset should live and which formats are expected. See `docs/pet-package.md` for the package-level manifest.
 
 ## Root Layout
 

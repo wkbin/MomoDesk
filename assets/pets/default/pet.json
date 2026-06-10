@@ -1,7 +1,10 @@
 {
+  "schemaVersion": 1,
   "id": "default_cat",
   "name": "Momo",
   "version": 1,
+  "description": "Default placeholder cat package for MomoDesk development.",
+  "author": "MomoDesk",
   "frameWidth": 256,
   "frameHeight": 256,
   "anchor": {
@@ -9,6 +12,16 @@
     "y": 0.92
   },
   "scale": 0.65,
+  "atlas": {
+    "image": "atlas/cat_spritesheet.png",
+    "data": "atlas/cat.atlas.json"
+  },
+  "behavior": {
+    "defaultState": "idle",
+    "dragState": "drag",
+    "feedState": "eat",
+    "sleepState": "sleep"
+  },
   "animations": {
     "idle": {
       "fps": 8,
