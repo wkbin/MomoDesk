@@ -47,6 +47,17 @@ cmd /c "call ""C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliar
 
 ## Development Commands
 
+On Windows, use the helper scripts from the repository root:
+
+```text
+run-momodesk.bat
+run-browser-preview.bat
+```
+
+`run-momodesk.bat` loads the Visual Studio C++ environment, installs npm dependencies if needed, clears port `1420`, and starts the Tauri desktop app.
+
+Manual commands:
+
 ```powershell
 npm install
 npm run dev

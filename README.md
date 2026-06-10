@@ -13,6 +13,15 @@ MomoDesk is a lightweight desktop pet prototype for a personal cat companion. Th
 
 Required developer environment is documented in `docs/runtime-environment.md`.
 
+On Windows, double-click one of these scripts:
+
+```text
+run-momodesk.bat
+run-browser-preview.bat
+```
+
+Or run commands manually:
+
 ```powershell
 npm install
 npm run dev
