@@ -1,4 +1,26 @@
 import type { PetModel } from "../types/pet";
+import type { PetPackageAnchor, AnimationKey } from "../types/pet-package";
+
+interface CanvasPetRendererOptions {
+  useStaticImageCssFallback?: boolean;
+}
+
+interface FrameAnimationDefinition {
+  fps: number;
+  loop: boolean;
+  frameUrls: string[];
+  frameWidth: number;
+  frameHeight: number;
+  anchor: PetPackageAnchor;
+  loopStartFrame?: number;
+  loopEndFrame?: number;
+}
+
+interface LoadedFrameAnimation extends FrameAnimationDefinition {
+  frames: HTMLImageElement[];
+  lastReadyFrame: HTMLImageElement | null;
+  ready: Promise<void[]>;
+}
 
 const BODY = "#f59f46";
 const BODY_SHADOW = "#d96f35";
@@ -6,15 +28,21 @@ const CREAM = "#fff3da";
 const DARK = "#3f2b22";
 const PINK = "#f59aa6";
 const STRIPE = "#a84d2b";
+const WALK_LEFT_ANIMATION: AnimationKey = "walk_left";
 
 export class CanvasPetRenderer {
   private ctx: CanvasRenderingContext2D;
   private staticImage: HTMLImageElement | null = null;
   private staticImageLoaded = false;
+  private staticImageSrc: string | null = null;
+  private readonly frameAnimations = new Map<AnimationKey, LoadedFrameAnimation>();
   private width = 0;
   private height = 0;
 
-  constructor(private readonly canvas: HTMLCanvasElement) {
+  constructor(
+    private readonly canvas: HTMLCanvasElement,
+    private readonly options: CanvasPetRendererOptions = {}
+  ) {
     const ctx = canvas.getContext("2d", { alpha: true });
     if (!ctx) {
       throw new Error("Canvas 2D context is unavailable");
@@ -26,22 +54,83 @@ export class CanvasPetRenderer {
   setStaticImage(src: string | null): void {
     this.staticImage = null;
     this.staticImageLoaded = false;
+    this.staticImageSrc = src;
+    this.canvas.style.backgroundImage =
+      src && this.options.useStaticImageCssFallback ? `url("${src}")` : "";
+    this.canvas.style.backgroundRepeat =
+      src && this.options.useStaticImageCssFallback ? "no-repeat" : "";
 
     if (!src) {
       return;
     }
 
     const image = new Image();
-    image.onload = () => {
-      this.staticImageLoaded = true;
-    };
     image.onerror = () => {
+      if (this.staticImageSrc !== src) {
+        return;
+      }
+
       console.warn("Failed to load static pet image", src);
       this.staticImage = null;
       this.staticImageLoaded = false;
     };
     image.src = src;
     this.staticImage = image;
+
+    void image.decode().then(() => {
+      if (this.staticImageSrc !== src) {
+        return;
+      }
+
+      this.staticImageLoaded = true;
+    }).catch((error) => {
+      if (this.staticImageSrc !== src) {
+        return;
+      }
+
+      console.warn("Failed to decode static pet image", src, error);
+      this.staticImage = null;
+      this.staticImageLoaded = false;
+    });
+  }
+
+  setFrameAnimation(state: AnimationKey, definition: FrameAnimationDefinition): void {
+    const decodePromises: Promise<void>[] = [];
+    const animation: LoadedFrameAnimation = {
+      ...definition,
+      frames: definition.frameUrls.map((src) => {
+        const image = new Image();
+        image.decoding = "async";
+        image.src = src;
+        const decodePromise = image.decode().catch((error) => {
+          console.warn("Failed to decode pet animation frame", src, error);
+        });
+        decodePromises.push(decodePromise);
+        return image;
+      }),
+      lastReadyFrame: null,
+      ready: Promise.all(decodePromises)
+    };
+
+    this.frameAnimations.set(state, animation);
+  }
+
+  async preloadFrameAnimations(): Promise<void> {
+    await Promise.all([...this.frameAnimations.values()].map((animation) => animation.ready));
+  }
+
+  hasFrameAnimation(state: AnimationKey): boolean {
+    const animation = this.getFrameAnimationForKey(state).animation;
+    return Boolean(animation?.frames.length);
+  }
+
+  getFrameAnimationDurationMs(state: AnimationKey): number | null {
+    const animation = this.getFrameAnimationForKey(state).animation;
+    if (!animation || animation.frames.length === 0 || animation.fps <= 0) {
+      return null;
+    }
+
+    return (animation.frames.length / animation.fps) * 1000;
   }
 
   resize(width: number, height: number, displayWidth = width, displayHeight = height): void {
@@ -58,12 +147,23 @@ export class CanvasPetRenderer {
   render(pet: PetModel, now: number): void {
     this.ctx.clearRect(0, 0, this.width, this.height);
     this.drawSoftShadow(pet);
+
     this.ctx.save();
     this.ctx.translate(pet.position.x, pet.position.y);
-    this.ctx.scale(pet.facing === "left" ? -1 : 1, 1);
-    if (this.staticImage && this.staticImageLoaded) {
+    if (this.drawFrameAnimation(pet)) {
+      this.clearStaticImageFallback();
+      // Frame animation handled the current state.
+    } else if (this.staticImage && this.staticImageLoaded) {
+      this.updateStaticImageFallback(pet, now);
+      if (this.staticImageSrc && this.options.useStaticImageCssFallback) {
+        this.ctx.restore();
+        return;
+      }
+      this.ctx.scale(pet.facing === "left" ? -1 : 1, 1);
       this.drawStaticCat(pet, now);
     } else {
+      this.clearStaticImageFallback();
+      this.ctx.scale(pet.facing === "left" ? -1 : 1, 1);
       this.drawCat(pet, now);
     }
     this.ctx.restore();
@@ -110,25 +210,20 @@ export class CanvasPetRenderer {
 
   private drawStaticCat(pet: PetModel, now: number): void {
     const ctx = this.ctx;
-    const bob = this.getBob(pet, now);
-    const scale = pet.state === "sleep" ? 0.74 : 0.8;
-    const imageSize = 170 * scale;
-    const anchorX = imageSize * 0.5;
-    const anchorY = imageSize * 0.92;
-    const yOffset = pet.state === "sleep" ? 14 : 0;
+    const placement = this.getStaticImagePlacement(pet, now);
 
     ctx.save();
-    ctx.translate(0, bob + yOffset);
+    ctx.translate(0, placement.bob + placement.yOffset);
     if (pet.state === "sleep") {
       ctx.rotate(-0.08);
     }
 
     ctx.drawImage(
       this.staticImage!,
-      -anchorX,
-      -anchorY,
-      imageSize,
-      imageSize
+      -placement.anchorX,
+      -placement.anchorY,
+      placement.imageSize,
+      placement.imageSize
     );
 
     if (pet.state === "eat") {
@@ -139,6 +234,142 @@ export class CanvasPetRenderer {
     if (pet.state === "sleep") {
       this.drawZzz(now);
     }
+  }
+
+  private updateStaticImageFallback(pet: PetModel, now: number): void {
+    if (!this.staticImageSrc || !this.options.useStaticImageCssFallback) {
+      return;
+    }
+
+    const placement = this.getStaticImagePlacement(pet, now);
+    const left = pet.position.x - placement.anchorX;
+    const top = pet.position.y + placement.bob + placement.yOffset - placement.anchorY;
+    this.canvas.style.backgroundSize = `${placement.imageSize}px ${placement.imageSize}px`;
+    this.canvas.style.backgroundPosition = `${left}px ${top}px`;
+  }
+
+  private clearStaticImageFallback(): void {
+    if (!this.options.useStaticImageCssFallback || !this.canvas.style.backgroundImage) {
+      return;
+    }
+
+    this.canvas.style.backgroundImage = "";
+  }
+
+  private getStaticImagePlacement(pet: PetModel, now: number): {
+    anchorX: number;
+    anchorY: number;
+    bob: number;
+    imageSize: number;
+    yOffset: number;
+  } {
+    const bob = this.getBob(pet, now);
+    const imageSize = pet.state === "sleep" ? 158 : 190;
+    return {
+      anchorX: imageSize * 0.5,
+      anchorY: imageSize * (pet.state === "sleep" ? 0.86 : 0.85),
+      bob,
+      imageSize,
+      yOffset: pet.state === "sleep" ? 14 : 0
+    };
+  }
+
+  private drawFrameAnimation(pet: PetModel): boolean {
+    const animationKey = this.getAnimationKey(pet);
+    const { animation, mirrored } = this.getFrameAnimationForKey(animationKey);
+    if (!animation || animation.frames.length === 0) {
+      return false;
+    }
+
+    const frame = this.getAnimationFrame(animation, pet.stateElapsedMs);
+    if (!frame.complete || frame.naturalWidth === 0) {
+      if (animation.lastReadyFrame) {
+        this.drawAnimationFrame(animation, animation.lastReadyFrame, mirrored);
+        return true;
+      }
+
+      return false;
+    }
+
+    animation.lastReadyFrame = frame;
+    this.drawAnimationFrame(animation, frame, mirrored);
+    return true;
+  }
+
+  private drawAnimationFrame(
+    animation: LoadedFrameAnimation,
+    frame: HTMLImageElement,
+    mirrored: boolean
+  ): void {
+    const ctx = this.ctx;
+    const scale = Math.min(this.width / animation.frameWidth, this.height / animation.frameHeight);
+    const width = animation.frameWidth * scale;
+    const height = animation.frameHeight * scale;
+
+    ctx.save();
+    if (mirrored) {
+      ctx.scale(-1, 1);
+    }
+    ctx.drawImage(frame, -width / 2, -height / 2, width, height);
+    ctx.restore();
+  }
+
+  private getAnimationFrame(
+    animation: LoadedFrameAnimation,
+    stateElapsedMs: number
+  ): HTMLImageElement {
+    const frameCount = animation.frames.length;
+    const startFrame = this.clampFrameIndex(animation.loopStartFrame ?? 0, frameCount);
+    const endFrame = this.clampFrameIndex(animation.loopEndFrame ?? frameCount - 1, frameCount);
+    const rangeStart = Math.min(startFrame, endFrame);
+    const rangeEnd = Math.max(startFrame, endFrame);
+    const rangeFrameCount = rangeEnd - rangeStart + 1;
+    const frameIndex = Math.floor((stateElapsedMs / 1000) * animation.fps);
+    let boundedIndex: number;
+
+    if (animation.loop) {
+      if (rangeStart > 0 && frameIndex < rangeStart) {
+        boundedIndex = frameIndex;
+      } else {
+        const loopIndex = rangeStart > 0 ? frameIndex - rangeStart : frameIndex;
+        boundedIndex = rangeStart + (loopIndex % rangeFrameCount);
+      }
+    } else {
+      boundedIndex = Math.min(rangeStart + frameIndex, rangeEnd);
+    }
+
+    return animation.frames[boundedIndex];
+  }
+
+  private clampFrameIndex(index: number, frameCount: number): number {
+    return Math.min(frameCount - 1, Math.max(0, Math.floor(index)));
+  }
+
+  private getAnimationKey(pet: PetModel): AnimationKey {
+    if (pet.state === "walk") {
+      return pet.facing === "left" ? "walk_left" : "walk_right";
+    }
+
+    return pet.state;
+  }
+
+  private getFrameAnimationForKey(animationKey: AnimationKey): {
+    animation: LoadedFrameAnimation | undefined;
+    mirrored: boolean;
+  } {
+    const animation = this.frameAnimations.get(animationKey);
+    if (animation) {
+      return { animation, mirrored: false };
+    }
+
+    if (animationKey === "walk_right") {
+      return {
+        animation: this.frameAnimations.get(WALK_LEFT_ANIMATION),
+        mirrored: true
+      };
+    }
+
+    return { animation: undefined, mirrored: false };
   }
 
   private drawBody(pet: PetModel): void {

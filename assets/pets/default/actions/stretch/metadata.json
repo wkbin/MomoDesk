@@ -1,14 +1,15 @@
 {
   "action": "stretch",
-  "displayName": "Stretch",
-  "fps": 12,
-  "loop": false,
-  "frameWidth": 256,
-  "frameHeight": 256,
-  "anchor": { "x": 0.5, "y": 0.92 },
-  "source": "source/stretch.mp4",
-  "frames": "frames/stretch_*.png",
-  "preview": "preview/stretch.webp",
-  "required": false,
-  "notes": "One-shot stretch animation triggered by idle behavior or click."
+  "source": "C:\\Users\\wkbin\\Downloads\\4444.mp4",
+  "outputFrames": 121,
+  "sourceFps": 24.0,
+  "targetFrameSize": [
+    256,
+    256
+  ],
+  "transition": "idle_to_stretch_to_idle",
+  "reservedTransitions": [
+    "sleep_to_stretch_to_idle"
+  ],
+  "notes": "Extracted from user-provided sitting-to-stretch-to-sitting video; black background keyed to alpha with premultiplied resize."
 }

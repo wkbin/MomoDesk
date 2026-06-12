@@ -1,7 +1,7 @@
 {
   "action": "idle",
   "displayName": "Idle breathing",
-  "fps": 8,
+  "fps": 12,
   "loop": true,
   "frameWidth": 256,
   "frameHeight": 256,

@@ -1,6 +1,15 @@
 import { BehaviorEngine } from "../core/BehaviorEngine";
 import type { PetModel, Vec2 } from "../types/pet";
 
+interface PointerControllerOptions {
+  onDesktopDragStart?: (screenPoint: Vec2) => void;
+  onDesktopDragMove?: (screenPoint: Vec2) => void;
+  onDesktopDragEnd?: () => void;
+  windowDragHitRadius?: number;
+}
+
+const DRAG_START_DELAY_MS = 80;
+
 export class PointerController {
   private isPointerDown = false;
   private isDragging = false;
@@ -10,7 +19,8 @@ export class PointerController {
   constructor(
     private readonly canvas: HTMLCanvasElement,
     private readonly pet: PetModel,
-    private readonly behavior: BehaviorEngine
+    private readonly behavior: BehaviorEngine,
+    private readonly options: PointerControllerOptions = {}
   ) {}
 
   attach(): void {
@@ -33,6 +43,8 @@ export class PointerController {
       return;
     }
 
+    event.preventDefault();
+
     this.isPointerDown = true;
     this.pointerDownAt = performance.now();
     this.dragOffset = {
@@ -47,17 +59,26 @@ export class PointerController {
       return;
     }
 
+    event.preventDefault();
+
     const point = this.getCanvasPoint(event);
     const heldMs = performance.now() - this.pointerDownAt;
 
-    if (!this.isDragging && heldMs > 120) {
+    if (!this.isDragging && heldMs > DRAG_START_DELAY_MS) {
       this.isDragging = true;
       this.behavior.beginDrag(this.pet);
+      this.options.onDesktopDragStart?.(this.getScreenPoint(event));
     }
 
     if (this.isDragging) {
-      this.pet.position.x = point.x - this.dragOffset.x;
-      this.pet.position.y = point.y - this.dragOffset.y;
+      if (this.options.onDesktopDragMove) {
+        this.options.onDesktopDragMove(this.getScreenPoint(event));
+      } else {
+        this.behavior.dragTo(this.pet, {
+          x: point.x - this.dragOffset.x,
+          y: point.y - this.dragOffset.y
+        });
+      }
     }
   };
 
@@ -66,10 +87,13 @@ export class PointerController {
       return;
     }
 
+    event.preventDefault();
+
     this.isPointerDown = false;
 
     if (this.isDragging) {
       this.isDragging = false;
+      this.options.onDesktopDragEnd?.();
       this.behavior.releaseDrag(this.pet);
     } else {
       this.behavior.nudgeInteraction(this.pet);
@@ -95,9 +119,28 @@ export class PointerController {
     };
   }
 
+  private getScreenPoint(event: PointerEvent): Vec2 {
+    return {
+      x: event.screenX,
+      y: event.screenY
+    };
+  }
+
   private hitTest(point: Vec2): boolean {
+    const ctx = this.canvas.getContext("2d", { willReadFrequently: true });
+    if (ctx) {
+      const ratio = window.devicePixelRatio || 1;
+      const x = Math.floor(point.x * ratio);
+      const y = Math.floor(point.y * ratio);
+      const alpha = ctx.getImageData(x, y, 1, 1).data[3];
+      if (alpha > 24) {
+        return true;
+      }
+    }
+
     const dx = point.x - this.pet.position.x;
-    const dy = point.y - (this.pet.position.y - 46);
-    return dx * dx + dy * dy < 62 * 62;
+    const dy = point.y - this.pet.position.y;
+    const radius = this.options.windowDragHitRadius ?? 72;
+    return dx * dx + dy * dy < radius * radius;
   }
 }

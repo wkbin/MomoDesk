@@ -23,6 +23,8 @@ export interface PetPackageAnimation {
   loop: boolean;
   source: string;
   frames: string;
+  loopStartFrame?: number;
+  loopEndFrame?: number;
 }
 
 export interface PetPackageBehavior {

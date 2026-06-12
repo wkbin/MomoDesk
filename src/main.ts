@@ -8,4 +8,6 @@ if (!canvas) {
 }
 
 const app = new MomoDeskApp(canvas);
-void app.start();
+void app.start().catch((error) => {
+  console.error("Failed to start MomoDesk", error);
+});

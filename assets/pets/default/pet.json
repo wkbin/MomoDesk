@@ -27,19 +27,19 @@
   },
   "animations": {
     "idle": {
-      "fps": 8,
+      "fps": 12,
       "loop": true,
       "source": "actions/idle/source/idle.mp4",
       "frames": "actions/idle/frames/idle_*.png"
     },
     "walk_left": {
-      "fps": 12,
+      "fps": 8,
       "loop": true,
       "source": "actions/walk_left/source/walk_left.mp4",
       "frames": "actions/walk_left/frames/walk_left_*.png"
     },
     "walk_right": {
-      "fps": 12,
+      "fps": 8,
       "loop": true,
       "source": "actions/walk_right/source/walk_right.mp4",
       "frames": "actions/walk_right/frames/walk_right_*.png"
@@ -57,13 +57,13 @@
       "frames": "actions/sit_idle/frames/sit_idle_*.png"
     },
     "sleep": {
-      "fps": 4,
+      "fps": 30,
       "loop": true,
       "source": "actions/sleep/source/sleep.mp4",
       "frames": "actions/sleep/frames/sleep_*.png"
     },
     "stretch": {
-      "fps": 12,
+      "fps": 24,
       "loop": false,
       "source": "actions/stretch/source/stretch.mp4",
       "frames": "actions/stretch/frames/stretch_*.png"
@@ -75,10 +75,12 @@
       "frames": "actions/groom/frames/groom_*.png"
     },
     "drag": {
-      "fps": 8,
+      "fps": 12,
       "loop": true,
       "source": "actions/drag/source/drag.mp4",
-      "frames": "actions/drag/frames/drag_*.png"
+      "frames": "actions/drag/frames/drag_*.png",
+      "loopStartFrame": 30,
+      "loopEndFrame": 50
     },
     "fall": {
       "fps": 12,

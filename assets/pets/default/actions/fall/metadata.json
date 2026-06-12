@@ -10,5 +10,5 @@
   "frames": "frames/fall_*.png",
   "preview": "preview/fall.webp",
   "required": false,
-  "notes": "Short release/drop animation after dragging."
+  "notes": "Release, settle, and preserve the left-right head shake before returning to idle."
 }

@@ -1,7 +1,7 @@
 {
   "action": "walk_left",
   "displayName": "Walk left",
-  "fps": 12,
+  "fps": 8,
   "loop": true,
   "frameWidth": 256,
   "frameHeight": 256,

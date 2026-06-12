@@ -1,19 +1,40 @@
 import { invoke } from "@tauri-apps/api/core";
-import { LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
+import { PhysicalPosition, LogicalSize, currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import { BehaviorEngine } from "../core/BehaviorEngine";
 import { PetPackageLoader } from "../pet-package/PetPackageLoader";
 import { CanvasPetRenderer } from "../renderer/CanvasPetRenderer";
 import { PointerController } from "../interaction/PointerController";
 import type { PetModel, PetPersistState, PetState, Settings } from "../types/pet";
-import type { PetPackageManifest } from "../types/pet-package";
+import type { AnimationKey, PetPackageManifest } from "../types/pet-package";
 
 const INITIAL_SIZE = 220;
 const SAVE_INTERVAL_MS = 5000;
+const PREVIEW_WALK_DURATION_MS = 6000;
+const PREVIEW_WALK_SPEED_PX_PER_SECOND = 60;
+const IDLE_LOOP_START_FRAME = 6;
+const IDLE_LOOP_END_FRAME = 59;
+const WALK_LEFT_LOOP_START_FRAME = 39;
+const WALK_LEFT_LOOP_END_FRAME = 86;
+const WALK_RIGHT_LOOP_START_FRAME = 39;
+const WALK_RIGHT_LOOP_END_FRAME = 86;
 const TAURI_AVAILABLE = "__TAURI_INTERNALS__" in window;
 const DEFAULT_STATIC_IMAGE_URL = new URL(
   "../../assets/pets/default/preview/cat_static.png",
   import.meta.url
 ).href;
+const DEFAULT_PET_PREVIEW_ASSETS = import.meta.glob("../../assets/pets/default/preview/*", {
+  eager: true,
+  query: "?url",
+  import: "default"
+}) as Record<string, string>;
+const DEFAULT_PET_FRAME_ASSETS = import.meta.glob(
+  "../../assets/pets/default/actions/*/frames/*.png",
+  {
+    eager: true,
+    query: "?url",
+    import: "default"
+  }
+) as Record<string, string>;
 
 const DEFAULT_SETTINGS: Settings = {
   autostart: false,
@@ -45,8 +66,31 @@ export class MomoDeskApp {
   private settings: Settings = DEFAULT_SETTINGS;
   private lastFrame = performance.now();
   private lastSavedState: PetState;
+  private previewStateUntilMs = 0;
+  private windowWalkAnimation: {
+    startedAt: number;
+    durationMs: number;
+    fromX: number;
+    fromY: number;
+    toX: number;
+    toY: number;
+  } | null = null;
   private saveTimerId = 0;
   private rafId = 0;
+  private desktopDragOrigin: {
+    pointerX: number;
+    pointerY: number;
+    windowX: number;
+    windowY: number;
+  } | null = null;
+  private desktopDragBounds: {
+    minX: number;
+    maxX: number;
+    minY: number;
+    maxY: number;
+  } | null = null;
+  private pendingDesktopWindowPosition: { x: number; y: number } | null = null;
+  private desktopWindowMoveInFlight = false;
 
   constructor(private readonly canvas: HTMLCanvasElement) {
     const floorY = INITIAL_SIZE * 0.74;
@@ -69,16 +113,22 @@ export class MomoDeskApp {
       height: INITIAL_SIZE,
       floorY
     });
-    this.pointer = new PointerController(canvas, this.pet, this.behavior);
+    this.pointer = new PointerController(canvas, this.pet, this.behavior, {
+      onDesktopDragStart: TAURI_AVAILABLE ? this.beginDesktopDrag : undefined,
+      onDesktopDragMove: TAURI_AVAILABLE ? this.updateDesktopDrag : undefined,
+      onDesktopDragEnd: TAURI_AVAILABLE ? this.endDesktopDrag : undefined,
+      windowDragHitRadius: TAURI_AVAILABLE ? 96 : undefined
+    });
   }
 
   async start(): Promise<void> {
+    this.resize();
     this.petPackage = await this.packageLoader.loadDefault();
-    await this.loadPersistedState();
-    await this.applySettings();
-    this.applyPetPackage();
+    await this.applyPetPackage();
+    await this.restoreDesktopState();
 
     window.addEventListener("resize", () => this.resize());
+    window.addEventListener("keydown", this.onPreviewKeyDown);
     this.attachTrayEvents();
     this.pointer.attach();
     this.canvas.addEventListener("pointerup", this.onPointerPersist);
@@ -86,11 +136,13 @@ export class MomoDeskApp {
       void this.savePetState();
     }, SAVE_INTERVAL_MS);
     this.loop(this.lastFrame);
+    await this.showDesktopWindow();
   }
 
   stop(): void {
     window.cancelAnimationFrame(this.rafId);
     window.clearInterval(this.saveTimerId);
+    window.removeEventListener("keydown", this.onPreviewKeyDown);
     this.canvas.removeEventListener("pointerup", this.onPointerPersist);
     this.pointer.detach();
     void this.savePetState();
@@ -108,6 +160,15 @@ export class MomoDeskApp {
     this.behavior.restorePosition(this.pet, state.position);
     this.behavior.setState(this.pet, this.toRestorableState(state.lastState));
     this.lastSavedState = this.pet.state;
+  }
+
+  private async restoreDesktopState(): Promise<void> {
+    try {
+      await this.loadPersistedState();
+      await this.applySettings();
+    } catch (error) {
+      console.warn("Failed to restore desktop pet state", error);
+    }
   }
 
   private async loadSettings(): Promise<Settings> {
@@ -134,13 +195,13 @@ export class MomoDeskApp {
     }
 
     const window = getCurrentWindow();
-    await this.tryTauri(() => window.setAlwaysOnTop(this.settings.alwaysOnTop));
-    await this.tryTauri(() =>
+    await this.safeTauri(() => window.setAlwaysOnTop(this.settings.alwaysOnTop));
+    await this.safeTauri(() =>
       window.setSize(new LogicalSize(this.getScaledSize(), this.getScaledSize()))
     );
   }
 
-  private applyPetPackage(): void {
+  private async applyPetPackage(): Promise<void> {
     if (!this.petPackage) {
       return;
     }
@@ -149,8 +210,94 @@ export class MomoDeskApp {
     this.canvas.dataset.petPackage = this.petPackage.id;
 
     if (this.petPackage.preview?.staticImage) {
-      this.renderer.setStaticImage(DEFAULT_STATIC_IMAGE_URL);
+      this.renderer.setStaticImage(
+        this.resolveDefaultPetAsset(this.petPackage.preview.staticImage) ?? DEFAULT_STATIC_IMAGE_URL
+      );
     }
+
+    for (const [animationKey, animation] of Object.entries(this.petPackage.animations) as Array<
+      [AnimationKey, PetPackageManifest["animations"][AnimationKey]]
+    >) {
+      const frameUrls = this.resolveDefaultPetFrameAssets(animation.frames);
+      if (frameUrls.length === 0) {
+        continue;
+      }
+
+      this.renderer.setFrameAnimation(animationKey, {
+        fps: animation.fps,
+        loop: animation.loop,
+        frameUrls,
+        frameWidth: this.petPackage.frameWidth,
+        frameHeight: this.petPackage.frameHeight,
+        anchor: this.petPackage.anchor,
+        loopStartFrame: this.getAnimationLoopStartFrame(animationKey, animation),
+        loopEndFrame: this.getAnimationLoopEndFrame(animationKey, animation)
+      });
+    }
+    await this.renderer.preloadFrameAnimations();
+  }
+
+  private getAnimationLoopStartFrame(
+    animationKey: AnimationKey,
+    animation: PetPackageManifest["animations"][AnimationKey]
+  ): number | undefined {
+    if (animation.loopStartFrame !== undefined) {
+      return animation.loopStartFrame;
+    }
+
+    if (animationKey === "idle") {
+      return IDLE_LOOP_START_FRAME;
+    }
+
+    if (animationKey === "walk_left") {
+      return WALK_LEFT_LOOP_START_FRAME;
+    }
+
+    if (animationKey === "walk_right") {
+      return WALK_RIGHT_LOOP_START_FRAME;
+    }
+
+    return undefined;
+  }
+
+  private getAnimationLoopEndFrame(
+    animationKey: AnimationKey,
+    animation: PetPackageManifest["animations"][AnimationKey]
+  ): number | undefined {
+    if (animation.loopEndFrame !== undefined) {
+      return animation.loopEndFrame;
+    }
+
+    if (animationKey === "idle") {
+      return IDLE_LOOP_END_FRAME;
+    }
+
+    if (animationKey === "walk_left") {
+      return WALK_LEFT_LOOP_END_FRAME;
+    }
+
+    if (animationKey === "walk_right") {
+      return WALK_RIGHT_LOOP_END_FRAME;
+    }
+
+    return undefined;
+  }
+
+  private resolveDefaultPetAsset(path: string): string | null {
+    const normalizedPath = path.replace(/\\/g, "/").replace(/^\.?\//, "");
+    return DEFAULT_PET_PREVIEW_ASSETS[`../../assets/pets/default/${normalizedPath}`] ?? null;
+  }
+
+  private resolveDefaultPetFrameAssets(pattern: string): string[] {
+    const normalizedPattern = pattern.replace(/\\/g, "/").replace(/^\.?\//, "");
+    const [prefix, suffix = ""] = normalizedPattern.split("*");
+    const assetPrefix = `../../assets/pets/default/${prefix}`;
+    const assetSuffix = suffix;
+
+    return Object.entries(DEFAULT_PET_FRAME_ASSETS)
+      .filter(([path]) => path.startsWith(assetPrefix) && path.endsWith(assetSuffix))
+      .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
+      .map(([, url]) => url);
   }
 
   private async savePetState(): Promise<void> {
@@ -160,7 +307,7 @@ export class MomoDeskApp {
 
     const state: PetPersistState = {
       position: this.behavior.getPosition(this.pet),
-      lastState: this.pet.state,
+      lastState: this.previewStateUntilMs > 0 ? "idle" : this.pet.state,
       lastActiveAt: new Date().toISOString()
     };
 
@@ -206,12 +353,91 @@ export class MomoDeskApp {
     const deltaMs = Math.min(now - this.lastFrame, 64);
     this.lastFrame = now;
 
-    this.behavior.update(this.pet, deltaMs);
+    if (this.isPreviewStateActive(now)) {
+      this.pet.stateElapsedMs += deltaMs;
+      void this.updateWindowWalk(now);
+    } else {
+      if (this.previewStateUntilMs > 0) {
+        this.previewStateUntilMs = 0;
+        this.windowWalkAnimation = null;
+        this.behavior.setState(this.pet, "idle");
+      }
+
+      if (TAURI_AVAILABLE) {
+        this.keepDesktopIdleOnly(deltaMs);
+      } else {
+        this.behavior.update(this.pet, deltaMs);
+      }
+    }
+    this.keepPetAnchoredInDesktopWindow();
+    this.keepDesktopPreviewInIdle();
     this.renderer.render(this.pet, now);
     this.saveOnStateChange();
 
     this.rafId = window.requestAnimationFrame(this.loop);
   };
+
+  private keepPetAnchoredInDesktopWindow(): void {
+    if (!TAURI_AVAILABLE) {
+      return;
+    }
+
+    this.pet.position.x = INITIAL_SIZE / 2;
+    this.pet.position.y = INITIAL_SIZE / 2;
+    this.pet.target = { ...this.pet.position };
+    this.pet.velocity = { x: 0, y: 0 };
+  }
+
+  private keepDesktopPreviewInIdle(): void {
+    if (!TAURI_AVAILABLE || this.pet.state === "idle" || this.hasAnimationForCurrentState()) {
+      return;
+    }
+
+    this.behavior.setState(this.pet, "idle");
+  }
+
+  private keepDesktopIdleOnly(deltaMs: number): void {
+    if (this.pet.state === "walk") {
+      this.behavior.setState(this.pet, "idle");
+      return;
+    }
+
+    this.pet.stateElapsedMs += deltaMs;
+
+    const oneShotDurationMs = this.getDesktopOneShotDurationMs(this.pet.state);
+    if (oneShotDurationMs !== null && this.pet.stateElapsedMs >= oneShotDurationMs) {
+      this.behavior.setState(this.pet, "idle");
+    }
+  }
+
+  private getDesktopOneShotDurationMs(state: PetState): number | null {
+    if (state === "fall") {
+      return this.renderer.getFrameAnimationDurationMs("fall") ?? 1800;
+    }
+
+    if (state === "stretch") {
+      return this.renderer.getFrameAnimationDurationMs("stretch") ?? 5100;
+    }
+
+    if (state === "groom") {
+      return 1800;
+    }
+
+    if (state === "eat") {
+      return 2200;
+    }
+
+    return null;
+  }
+
+  private hasAnimationForCurrentState(): boolean {
+    if (this.pet.state === "walk") {
+      return this.renderer.hasFrameAnimation(this.pet.facing === "left" ? "walk_left" : "walk_right")
+        || this.renderer.hasFrameAnimation("walk_left");
+    }
+
+    return this.renderer.hasFrameAnimation(this.pet.state);
+  }
 
   private saveOnStateChange(): void {
     if (this.pet.state === this.lastSavedState) {
@@ -226,6 +452,168 @@ export class MomoDeskApp {
     void this.savePetState();
   };
 
+  private onPreviewKeyDown = (event: KeyboardEvent): void => {
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      void this.playPreviewWalk("left");
+      return;
+    }
+
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      void this.playPreviewWalk("right");
+      return;
+    }
+
+    if (event.key === " ") {
+      event.preventDefault();
+      this.behavior.setState(this.pet, "idle");
+    }
+  };
+
+  private async playPreviewWalk(facing: "left" | "right"): Promise<void> {
+    this.pet.facing = facing;
+    this.pet.position = {
+      x: INITIAL_SIZE / 2,
+      y: TAURI_AVAILABLE ? INITIAL_SIZE / 2 : INITIAL_SIZE * 0.74
+    };
+    this.pet.target = {
+      x: this.pet.position.x,
+      y: this.pet.position.y
+    };
+    this.behavior.setState(this.pet, "walk");
+    const now = performance.now();
+    const durationMs = PREVIEW_WALK_DURATION_MS;
+    this.previewStateUntilMs = now + durationMs;
+
+    if (!TAURI_AVAILABLE) {
+      return;
+    }
+
+    const window = getCurrentWindow();
+    try {
+      const [position, size, monitor] = await Promise.all([
+        window.outerPosition(),
+        window.outerSize(),
+        currentMonitor()
+      ]);
+      const distance = (durationMs / 1000) * PREVIEW_WALK_SPEED_PX_PER_SECOND;
+      const signedDistance = facing === "left" ? -distance : distance;
+      const targetX = position.x + signedDistance;
+      const targetY = position.y;
+      const bounds = monitor?.workArea ?? monitor;
+      this.windowWalkAnimation = {
+        startedAt: now,
+        durationMs,
+        fromX: position.x,
+        fromY: position.y,
+        toX: bounds
+          ? this.clamp(targetX, bounds.position.x, bounds.position.x + bounds.size.width - size.width)
+          : targetX,
+        toY: bounds
+          ? this.clamp(targetY, bounds.position.y, bounds.position.y + bounds.size.height - size.height)
+          : targetY
+      };
+    } catch (error) {
+      console.warn("Failed to read desktop pet window position", error);
+    }
+  }
+
+  private isPreviewStateActive(now: number): boolean {
+    return this.previewStateUntilMs > now && this.pet.state === "walk";
+  }
+
+  private async updateWindowWalk(now: number): Promise<void> {
+    if (!TAURI_AVAILABLE || !this.windowWalkAnimation) {
+      return;
+    }
+
+    const walk = this.windowWalkAnimation;
+    const progress = Math.min(1, Math.max(0, (now - walk.startedAt) / walk.durationMs));
+    const x = Math.round(walk.fromX + (walk.toX - walk.fromX) * progress);
+    const y = Math.round(walk.fromY + (walk.toY - walk.fromY) * progress);
+
+    await this.safeTauri(
+      () => getCurrentWindow().setPosition(new PhysicalPosition(x, y)),
+      "Failed to move desktop pet window"
+    );
+  }
+
+  private beginDesktopDrag = (screenPoint: { x: number; y: number }): void => {
+    void this.safeTauri(async () => {
+      const window = getCurrentWindow();
+      const [position, size, monitor] = await Promise.all([
+        window.outerPosition(),
+        window.outerSize(),
+        currentMonitor()
+      ]);
+
+      const workArea = monitor?.workArea ?? monitor;
+      this.desktopDragOrigin = {
+        pointerX: screenPoint.x,
+        pointerY: screenPoint.y,
+        windowX: position.x,
+        windowY: position.y
+      };
+
+      this.desktopDragBounds = workArea
+        ? {
+            minX: workArea.position.x,
+            maxX: workArea.position.x + workArea.size.width - size.width,
+            minY: workArea.position.y,
+            maxY: workArea.position.y + workArea.size.height - size.height
+          }
+        : null;
+    }, "Failed to capture desktop pet window position");
+  };
+
+  private updateDesktopDrag = (screenPoint: { x: number; y: number }): void => {
+    if (!this.desktopDragOrigin) {
+      return;
+    }
+
+    const nextPosition = {
+      x: this.desktopDragOrigin.windowX + (screenPoint.x - this.desktopDragOrigin.pointerX),
+      y: this.desktopDragOrigin.windowY + (screenPoint.y - this.desktopDragOrigin.pointerY)
+    };
+
+    this.pendingDesktopWindowPosition = this.desktopDragBounds
+      ? {
+          x: this.clamp(nextPosition.x, this.desktopDragBounds.minX, this.desktopDragBounds.maxX),
+          y: this.clamp(nextPosition.y, this.desktopDragBounds.minY, this.desktopDragBounds.maxY)
+        }
+      : nextPosition;
+
+    if (this.desktopWindowMoveInFlight) {
+      return;
+    }
+
+    this.desktopWindowMoveInFlight = true;
+    void this.flushDesktopWindowMove();
+  };
+
+  private endDesktopDrag = (): void => {
+    this.desktopDragOrigin = null;
+    this.desktopDragBounds = null;
+    this.pendingDesktopWindowPosition = null;
+  };
+
+  private async flushDesktopWindowMove(): Promise<void> {
+    while (this.pendingDesktopWindowPosition) {
+      const nextPosition = this.pendingDesktopWindowPosition;
+      this.pendingDesktopWindowPosition = null;
+
+      await this.safeTauri(
+        () => getCurrentWindow().setPosition(
+          new PhysicalPosition(Math.round(nextPosition.x), Math.round(nextPosition.y))
+        ),
+        "Failed to move desktop pet window"
+      );
+    }
+
+    this.desktopWindowMoveInFlight = false;
+  }
+
   private toRestorableState(state: PetState): PetState {
     if (!RESTORABLE_STATES.has(state)) {
       return "idle";
@@ -236,6 +624,14 @@ export class MomoDeskApp {
 
   private getScaledSize(): number {
     return Math.max(80, Math.round(INITIAL_SIZE * this.settings.scale));
+  }
+
+  private clamp(value: number, min: number, max: number): number {
+    if (max < min) {
+      return min;
+    }
+
+    return Math.min(max, Math.max(min, value));
   }
 
   private async tryTauri<T>(operation: () => Promise<T>, fallback?: T): Promise<T> {
@@ -249,5 +645,24 @@ export class MomoDeskApp {
 
       throw error;
     }
+  }
+
+  private async safeTauri(
+    operation: () => Promise<unknown>,
+    message = "Tauri operation failed"
+  ): Promise<void> {
+    try {
+      await operation();
+    } catch (error) {
+      console.warn(message, error);
+    }
+  }
+
+  private async showDesktopWindow(): Promise<void> {
+    if (!TAURI_AVAILABLE) {
+      return;
+    }
+
+    await this.safeTauri(() => getCurrentWindow().show());
   }
 }

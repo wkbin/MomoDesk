@@ -19,11 +19,12 @@
         "height": 220,
         "decorations": false,
         "transparent": true,
+        "backgroundColor": "#00000000",
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "resizable": false,
         "center": true,
-        "visible": true
+        "visible": false
       }
     ],
     "security": {

@@ -6,6 +6,9 @@ src-tauri/gen/
 *.log
 .DS_Store
 Thumbs.db
+tmp/
+idle_candidates_mid.png
+idle_contact_sheet.png
 .env
 .env.*
 !.env.example
@@ -13,3 +16,5 @@ assets/references/*
 !assets/references/README.md
 assets/pets/*/actions/*/source/*
 !assets/pets/*/actions/*/source/.gitkeep
+assets/pets/*/actions/*/preview/*
+!assets/pets/*/actions/*/preview/.gitkeep

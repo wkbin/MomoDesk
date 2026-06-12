@@ -4,6 +4,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager,
 };
+use tauri::window::Color;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,6 +55,7 @@ pub fn run() {
             load_pet_state
         ])
         .setup(|app| {
+            configure_pet_window(app)?;
             build_tray(app)?;
             Ok(())
         })
@@ -93,6 +95,17 @@ fn load_pet_state(app: AppHandle) -> Result<Option<PetPersistState>, String> {
     })
 }
 
+fn configure_pet_window(app: &mut tauri::App) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window("pet") {
+        let transparent = Color(0, 0, 0, 0);
+        window.set_background_color(Some(transparent))?;
+        let _ = window.set_shadow(false);
+        let _ = window.set_always_on_top(true);
+    }
+
+    Ok(())
+}
+
 fn write_json<T: Serialize>(app: &AppHandle, file_name: &str, value: &T) -> Result<(), String> {
     let app_data_dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
     std::fs::create_dir_all(&app_data_dir).map_err(|err| err.to_string())?;
@@ -117,12 +130,12 @@ fn read_json<T: serde::de::DeserializeOwned>(
 }
 
 fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
-    let recall_item = MenuItem::with_id(app, "recall", "Recall Momo", true, None::<&str>)?;
-    let feed_item = MenuItem::with_id(app, "feed", "Feed Momo", true, None::<&str>)?;
-    let sleep_item = MenuItem::with_id(app, "sleep", "Sleep Momo", true, None::<&str>)?;
-    let show_item = MenuItem::with_id(app, "show", "Show Momo", true, None::<&str>)?;
-    let hide_item = MenuItem::with_id(app, "hide", "Hide Momo", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let recall_item = MenuItem::with_id(app, "recall", "召回 Momo", true, None::<&str>)?;
+    let feed_item = MenuItem::with_id(app, "feed", "喂食 Momo", true, None::<&str>)?;
+    let sleep_item = MenuItem::with_id(app, "sleep", "让 Momo 睡觉", true, None::<&str>)?;
+    let show_item = MenuItem::with_id(app, "show", "显示 Momo", true, None::<&str>)?;
+    let hide_item = MenuItem::with_id(app, "hide", "隐藏 Momo", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
         &[

@@ -9,6 +9,7 @@ interface Bounds {
 const WALK_SPEED = 34;
 const GRAVITY = 1500;
 const LANDING_DAMPING = 0.35;
+const STRETCH_DURATION_MS = 5100;
 
 export class BehaviorEngine {
   constructor(private bounds: Bounds) {}
@@ -62,13 +63,20 @@ export class BehaviorEngine {
     this.setState(pet, "drag");
   }
 
+  dragTo(pet: PetModel, position: Vec2): void {
+    pet.position = {
+      x: this.clamp(position.x, 46, this.bounds.width - 46),
+      y: this.clamp(position.y, 0, this.bounds.floorY)
+    };
+  }
+
   releaseDrag(pet: PetModel): void {
     pet.velocity = { x: 0, y: 180 };
     this.setState(pet, "fall");
   }
 
   nudgeInteraction(pet: PetModel): void {
-    const next = Math.random() > 0.5 ? "stretch" : "groom";
+    const next = this.canStretchFrom(pet.state) && Math.random() > 0.5 ? "stretch" : "groom";
     this.setState(pet, next);
   }
 
@@ -165,7 +173,7 @@ export class BehaviorEngine {
 
   private isOneShotDone(pet: PetModel): boolean {
     if (pet.state === "stretch") {
-      return pet.stateElapsedMs > 1200;
+      return pet.stateElapsedMs > STRETCH_DURATION_MS;
     }
 
     if (pet.state === "groom") {
@@ -197,6 +205,11 @@ export class BehaviorEngine {
 
   private randomBetween(min: number, max: number): number {
     return min + Math.random() * (max - min);
+  }
+
+  private canStretchFrom(state: PetState): boolean {
+    // Sleep-to-stretch will get its own generated transition later.
+    return state === "idle";
   }
 
   private clamp(value: number, min: number, max: number): number {

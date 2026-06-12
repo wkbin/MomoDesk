@@ -1,7 +1,7 @@
 {
   "action": "drag",
   "displayName": "Dragged",
-  "fps": 8,
+  "fps": 12,
   "loop": true,
   "frameWidth": 256,
   "frameHeight": 256,
@@ -10,5 +10,5 @@
   "frames": "frames/drag_*.png",
   "preview": "preview/drag.webp",
   "required": true,
-  "notes": "Held pose while the user drags the cat."
+  "notes": "Pickup intro plays once, then the suspended kicking segment loops while the user drags the cat."
 }

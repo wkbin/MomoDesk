@@ -12,7 +12,9 @@ body {
   height: 100%;
   margin: 0;
   overflow: hidden;
-  background: transparent;
+  overflow: clip;
+  overscroll-behavior: none;
+  background: transparent !important;
   user-select: none;
 }
 
@@ -25,6 +27,7 @@ body {
   display: block;
   width: 220px;
   height: 220px;
+  background: transparent !important;
   cursor: grab;
   touch-action: none;
 }
