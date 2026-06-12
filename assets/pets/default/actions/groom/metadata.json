@@ -1,14 +1,12 @@
 {
   "action": "groom",
-  "displayName": "Groom",
-  "fps": 10,
-  "loop": true,
-  "frameWidth": 256,
-  "frameHeight": 256,
-  "anchor": { "x": 0.5, "y": 0.92 },
-  "source": "source/groom.mp4",
-  "frames": "frames/groom_*.png",
-  "preview": "preview/groom.webp",
-  "required": false,
-  "notes": "Licking paw or fur. Loop should be able to end cleanly."
+  "source": "C:\\Users\\wkbin\\Downloads\\555555.mp4",
+  "outputFrames": 121,
+  "sourceFps": 24.0,
+  "targetFrameSize": [
+    256,
+    256
+  ],
+  "transition": "idle_to_groom_to_idle",
+  "notes": "Extracted from user-provided black-background paw-licking and face-washing video; black background keyed to alpha."
 }

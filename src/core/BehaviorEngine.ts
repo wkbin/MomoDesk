@@ -10,6 +10,9 @@ const WALK_SPEED = 34;
 const GRAVITY = 1500;
 const LANDING_DAMPING = 0.35;
 const STRETCH_DURATION_MS = 5100;
+const GROOM_DURATION_MS = 5100;
+const EAT_DURATION_MS = 10050;
+const MIN_SLEEP_DURATION_MS = 45000;
 
 export class BehaviorEngine {
   constructor(private bounds: Bounds) {}
@@ -100,37 +103,52 @@ export class BehaviorEngine {
       return;
     }
 
+    if (this.isOneShotState(pet.state)) {
+      return;
+    }
+
     if (pet.nextDecisionMs > 0) {
       return;
     }
 
     if (pet.state === "sleep") {
-      pet.nextDecisionMs = this.randomBetween(3000, 7000);
+      if (pet.stateElapsedMs > MIN_SLEEP_DURATION_MS && Math.random() < 0.28) {
+        this.setState(pet, "idle");
+        return;
+      }
+
+      this.deferNextDecision(pet);
+      return;
+    }
+
+    if (pet.state !== "idle" && pet.state !== "sit") {
+      this.setState(pet, "idle");
       return;
     }
 
     const roll = Math.random();
-    if (pet.state === "sit" && pet.stateElapsedMs > 8000 && roll > 0.62) {
-      this.setState(pet, "sleep");
+
+    if (roll < 0.48) {
+      this.deferNextDecision(pet);
       return;
     }
 
-    if (roll < 0.42) {
+    if (roll < 0.64) {
       this.startWalking(pet);
       return;
     }
 
-    if (roll < 0.68) {
-      this.setState(pet, "sit");
-      return;
-    }
-
-    if (roll < 0.84) {
+    if (roll < 0.78) {
       this.setState(pet, "groom");
       return;
     }
 
-    this.setState(pet, "idle");
+    if (roll < 0.9 && this.canStretchFrom(pet.state)) {
+      this.setState(pet, "stretch");
+      return;
+    }
+
+    this.setState(pet, "sleep");
   }
 
   private updateWalk(pet: PetModel, deltaMs: number): void {
@@ -139,7 +157,7 @@ export class BehaviorEngine {
 
     if (distance < 2) {
       pet.position.x = pet.target.x;
-      this.setState(pet, Math.random() > 0.65 ? "sit" : "idle");
+      this.setState(pet, "idle");
       return;
     }
 
@@ -177,30 +195,38 @@ export class BehaviorEngine {
     }
 
     if (pet.state === "groom") {
-      return pet.stateElapsedMs > 1800;
+      return pet.stateElapsedMs > GROOM_DURATION_MS;
     }
 
     if (pet.state === "eat") {
-      return pet.stateElapsedMs > 2200;
+      return pet.stateElapsedMs > EAT_DURATION_MS;
     }
 
     return false;
   }
 
+  private isOneShotState(state: PetState): boolean {
+    return state === "stretch" || state === "groom" || state === "eat";
+  }
+
   private randomDecisionDelay(state: PetState): number {
     if (state === "idle") {
-      return this.randomBetween(1400, 3300);
+      return this.randomBetween(9000, 22000);
     }
 
     if (state === "sit") {
-      return this.randomBetween(3500, 9000);
+      return this.randomBetween(12000, 26000);
     }
 
     if (state === "sleep") {
-      return this.randomBetween(5000, 9000);
+      return this.randomBetween(9000, 18000);
     }
 
-    return this.randomBetween(900, 1800);
+    return this.randomBetween(1200, 2400);
+  }
+
+  private deferNextDecision(pet: PetModel): void {
+    pet.nextDecisionMs = this.randomDecisionDelay(pet.state);
   }
 
   private randomBetween(min: number, max: number): number {

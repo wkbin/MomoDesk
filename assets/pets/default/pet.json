@@ -69,8 +69,8 @@
       "frames": "actions/stretch/frames/stretch_*.png"
     },
     "groom": {
-      "fps": 10,
-      "loop": true,
+      "fps": 24,
+      "loop": false,
       "source": "actions/groom/source/groom.mp4",
       "frames": "actions/groom/frames/groom_*.png"
     },
@@ -89,7 +89,7 @@
       "frames": "actions/fall/frames/fall_*.png"
     },
     "eat": {
-      "fps": 10,
+      "fps": 24,
       "loop": false,
       "source": "actions/eat/source/eat.mp4",
       "frames": "actions/eat/frames/eat_*.png"

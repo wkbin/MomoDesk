@@ -11,6 +11,7 @@ const INITIAL_SIZE = 220;
 const SAVE_INTERVAL_MS = 5000;
 const PREVIEW_WALK_DURATION_MS = 6000;
 const PREVIEW_WALK_SPEED_PX_PER_SECOND = 60;
+const AUTONOMOUS_DESKTOP_WALK_SPEED_PX_PER_SECOND = 28;
 const IDLE_LOOP_START_FRAME = 6;
 const IDLE_LOOP_END_FRAME = 59;
 const WALK_LEFT_LOOP_START_FRAME = 39;
@@ -74,6 +75,7 @@ export class MomoDeskApp {
     fromY: number;
     toX: number;
     toY: number;
+    returnToIdleOnDone: boolean;
   } | null = null;
   private saveTimerId = 0;
   private rafId = 0;
@@ -91,6 +93,7 @@ export class MomoDeskApp {
   } | null = null;
   private pendingDesktopWindowPosition: { x: number; y: number } | null = null;
   private desktopWindowMoveInFlight = false;
+  private desktopAutonomousWalkStarting = false;
 
   constructor(private readonly canvas: HTMLCanvasElement) {
     const floorY = INITIAL_SIZE * 0.74;
@@ -321,6 +324,7 @@ export class MomoDeskApp {
 
     const window = getCurrentWindow();
     void window.listen("tray-recall", () => {
+      this.cancelDesktopMotion();
       this.behavior.restorePosition(this.pet, {
         x: INITIAL_SIZE / 2,
         y: INITIAL_SIZE * 0.74
@@ -330,11 +334,13 @@ export class MomoDeskApp {
     });
 
     void window.listen("tray-feed", () => {
+      this.cancelDesktopMotion();
       this.behavior.feed(this.pet);
       void this.savePetState();
     });
 
     void window.listen("tray-sleep", () => {
+      this.cancelDesktopMotion();
       this.behavior.sleep(this.pet);
       void this.savePetState();
     });
@@ -364,7 +370,7 @@ export class MomoDeskApp {
       }
 
       if (TAURI_AVAILABLE) {
-        this.keepDesktopIdleOnly(deltaMs);
+        void this.updateDesktopAutonomy(deltaMs, now);
       } else {
         this.behavior.update(this.pet, deltaMs);
       }
@@ -396,18 +402,48 @@ export class MomoDeskApp {
     this.behavior.setState(this.pet, "idle");
   }
 
-  private keepDesktopIdleOnly(deltaMs: number): void {
-    if (this.pet.state === "walk") {
-      this.behavior.setState(this.pet, "idle");
+  private async updateDesktopAutonomy(deltaMs: number, now: number): Promise<void> {
+    if (this.windowWalkAnimation?.returnToIdleOnDone && this.pet.state === "walk") {
+      this.pet.stateElapsedMs += deltaMs;
+      await this.updateWindowWalk(now);
       return;
     }
 
-    this.pet.stateElapsedMs += deltaMs;
+    if (this.pet.state === "walk") {
+      if (!this.desktopAutonomousWalkStarting) {
+        await this.startAutonomousDesktopWalk(now);
+      }
+      return;
+    }
+
+    const updatedState = this.updateBehaviorState(deltaMs);
+
+    if (updatedState === "walk") {
+      if (!this.desktopAutonomousWalkStarting) {
+        await this.startAutonomousDesktopWalk(now);
+      }
+      return;
+    }
+
+    if (this.windowWalkAnimation?.returnToIdleOnDone) {
+      this.windowWalkAnimation = null;
+    }
 
     const oneShotDurationMs = this.getDesktopOneShotDurationMs(this.pet.state);
     if (oneShotDurationMs !== null && this.pet.stateElapsedMs >= oneShotDurationMs) {
       this.behavior.setState(this.pet, "idle");
     }
+  }
+
+  private updateBehaviorState(deltaMs: number): PetState {
+    this.behavior.update(this.pet, deltaMs);
+    return this.pet.state;
+  }
+
+  private cancelDesktopMotion(): void {
+    this.previewStateUntilMs = 0;
+    this.windowWalkAnimation = null;
+    this.desktopAutonomousWalkStarting = false;
   }
 
   private getDesktopOneShotDurationMs(state: PetState): number | null {
@@ -420,11 +456,11 @@ export class MomoDeskApp {
     }
 
     if (state === "groom") {
-      return 1800;
+      return this.renderer.getFrameAnimationDurationMs("groom") ?? 5100;
     }
 
     if (state === "eat") {
-      return 2200;
+      return this.renderer.getFrameAnimationDurationMs("eat") ?? 10050;
     }
 
     return null;
@@ -512,10 +548,61 @@ export class MomoDeskApp {
           : targetX,
         toY: bounds
           ? this.clamp(targetY, bounds.position.y, bounds.position.y + bounds.size.height - size.height)
-          : targetY
+          : targetY,
+        returnToIdleOnDone: false
       };
     } catch (error) {
       console.warn("Failed to read desktop pet window position", error);
+    }
+  }
+
+  private async startAutonomousDesktopWalk(now: number): Promise<void> {
+    if (this.desktopAutonomousWalkStarting) {
+      return;
+    }
+
+    this.desktopAutonomousWalkStarting = true;
+    const window = getCurrentWindow();
+
+    try {
+      const [position, size, monitor] = await Promise.all([
+        window.outerPosition(),
+        window.outerSize(),
+        currentMonitor()
+      ]);
+      const bounds = monitor?.workArea ?? monitor;
+      const direction = Math.random() < 0.5 ? -1 : 1;
+      const distance = 80 + Math.random() * 120;
+      const targetX = position.x + direction * distance;
+      const clampedX = bounds
+        ? this.clamp(targetX, bounds.position.x, bounds.position.x + bounds.size.width - size.width)
+        : targetX;
+      const actualDistance = Math.abs(clampedX - position.x);
+
+      if (actualDistance < 12) {
+        this.behavior.setState(this.pet, "idle");
+        return;
+      }
+
+      this.pet.facing = clampedX < position.x ? "left" : "right";
+      this.windowWalkAnimation = {
+        startedAt: now,
+        durationMs: this.clamp(
+          (actualDistance / AUTONOMOUS_DESKTOP_WALK_SPEED_PX_PER_SECOND) * 1000,
+          2800,
+          6200
+        ),
+        fromX: position.x,
+        fromY: position.y,
+        toX: clampedX,
+        toY: position.y,
+        returnToIdleOnDone: true
+      };
+    } catch (error) {
+      console.warn("Failed to start autonomous desktop walk", error);
+      this.behavior.setState(this.pet, "idle");
+    } finally {
+      this.desktopAutonomousWalkStarting = false;
     }
   }
 
@@ -537,9 +624,18 @@ export class MomoDeskApp {
       () => getCurrentWindow().setPosition(new PhysicalPosition(x, y)),
       "Failed to move desktop pet window"
     );
+
+    if (progress >= 1 && walk.returnToIdleOnDone) {
+      this.windowWalkAnimation = null;
+      this.behavior.setState(this.pet, "idle");
+    }
   }
 
   private beginDesktopDrag = (screenPoint: { x: number; y: number }): void => {
+    this.previewStateUntilMs = 0;
+    this.windowWalkAnimation = null;
+    this.desktopAutonomousWalkStarting = false;
+
     void this.safeTauri(async () => {
       const window = getCurrentWindow();
       const [position, size, monitor] = await Promise.all([

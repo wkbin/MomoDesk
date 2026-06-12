@@ -1,14 +1,12 @@
 {
   "action": "eat",
-  "displayName": "Eat",
-  "fps": 10,
-  "loop": false,
-  "frameWidth": 256,
-  "frameHeight": 256,
-  "anchor": { "x": 0.5, "y": 0.92 },
-  "source": "source/eat.mp4",
-  "frames": "frames/eat_*.png",
-  "preview": "preview/eat.webp",
-  "required": false,
-  "notes": "Triggered by feed command. Prop-free eating motion is preferred for MVP."
+  "source": "C:\\Users\\wkbin\\Downloads\\999.mp4",
+  "outputFrames": 241,
+  "sourceFps": 24.0,
+  "targetFrameSize": [
+    256,
+    256
+  ],
+  "transition": "idle_to_eat_to_idle",
+  "notes": "Extracted from user-provided pre-cut eating video with food prop; edge-connected black background converted to alpha and tiny isolated artifacts removed."
 }

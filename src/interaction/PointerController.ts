@@ -8,13 +8,13 @@ interface PointerControllerOptions {
   windowDragHitRadius?: number;
 }
 
-const DRAG_START_DELAY_MS = 80;
+const DRAG_START_DISTANCE_PX = 2;
 
 export class PointerController {
   private isPointerDown = false;
   private isDragging = false;
   private dragOffset: Vec2 = { x: 0, y: 0 };
-  private pointerDownAt = 0;
+  private pointerDownPoint: Vec2 = { x: 0, y: 0 };
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -46,7 +46,7 @@ export class PointerController {
     event.preventDefault();
 
     this.isPointerDown = true;
-    this.pointerDownAt = performance.now();
+    this.pointerDownPoint = point;
     this.dragOffset = {
       x: point.x - this.pet.position.x,
       y: point.y - this.pet.position.y
@@ -62,9 +62,11 @@ export class PointerController {
     event.preventDefault();
 
     const point = this.getCanvasPoint(event);
-    const heldMs = performance.now() - this.pointerDownAt;
+    const movedX = point.x - this.pointerDownPoint.x;
+    const movedY = point.y - this.pointerDownPoint.y;
+    const movedEnough = movedX * movedX + movedY * movedY >= DRAG_START_DISTANCE_PX * DRAG_START_DISTANCE_PX;
 
-    if (!this.isDragging && heldMs > DRAG_START_DELAY_MS) {
+    if (!this.isDragging && movedEnough) {
       this.isDragging = true;
       this.behavior.beginDrag(this.pet);
       this.options.onDesktopDragStart?.(this.getScreenPoint(event));
