@@ -14,6 +14,15 @@ const GROOM_DURATION_MS = 5100;
 const EAT_DURATION_MS = 10050;
 const MIN_SLEEP_DURATION_MS = 45000;
 
+// Mood constants
+const MOOD_MAX = 100;
+const MOOD_MIN = 0;
+const MOOD_FEED = 20;
+const MOOD_NUDGE = 5;
+const MOOD_DRAG = -5;
+const IDLE_DECAY_PER_SEC = -0.02;
+const SLEEP_REGEN_PER_SEC = 0.08;
+
 export class BehaviorEngine {
   constructor(private bounds: Bounds) {}
 
@@ -23,6 +32,13 @@ export class BehaviorEngine {
 
   update(pet: PetModel, deltaMs: number): void {
     pet.stateElapsedMs += deltaMs;
+
+    // Passive mood changes during idle/sit/sleep
+    if (pet.state === "sleep") {
+      this.adjustMood(pet, SLEEP_REGEN_PER_SEC * (deltaMs / 1000));
+    } else if (pet.state === "idle" || pet.state === "sit") {
+      this.adjustMood(pet, IDLE_DECAY_PER_SEC * (deltaMs / 1000));
+    }
 
     switch (pet.state) {
       case "walk":
@@ -46,7 +62,7 @@ export class BehaviorEngine {
 
     pet.state = state;
     pet.stateElapsedMs = 0;
-    pet.nextDecisionMs = this.randomDecisionDelay(state);
+    pet.nextDecisionMs = this.randomDecisionDelay(state, pet.mood);
     pet.velocity = { x: 0, y: 0 };
   }
 
@@ -63,6 +79,7 @@ export class BehaviorEngine {
   }
 
   beginDrag(pet: PetModel): void {
+    this.adjustMood(pet, MOOD_DRAG);
     this.setState(pet, "drag");
   }
 
@@ -79,11 +96,19 @@ export class BehaviorEngine {
   }
 
   nudgeInteraction(pet: PetModel): void {
+    // When very unhappy, sometimes ignore the nudge entirely
+    if (pet.mood < 15 && Math.random() < 0.4) {
+      this.deferNextDecision(pet);
+      return;
+    }
+
+    this.adjustMood(pet, MOOD_NUDGE);
     const next = this.canStretchFrom(pet.state) && Math.random() > 0.5 ? "stretch" : "groom";
     this.setState(pet, next);
   }
 
   feed(pet: PetModel): void {
+    this.adjustMood(pet, MOOD_FEED);
     this.setState(pet, "eat");
   }
 
@@ -136,32 +161,42 @@ export class BehaviorEngine {
       return;
     }
 
-    const roll = Math.random();
+    this.chooseIdleAction(pet);
+  }
 
-    if (roll < 0.4) {
-      this.deferNextDecision(pet);
-      return;
-    }
+  /** Pick the next idle action using mood-modulated weights. */
+  private chooseIdleAction(pet: PetModel): void {
+    const moodFactor = (pet.mood - 50) / 50; // -1 to +1
 
-    if (roll < 0.56) {
+    // Base weights at neutral mood (sum = 100)
+    const deferWeight  = 40;                                                    // fixed anchor
+    const walkWeight   = Math.max(0, 16 + moodFactor * 12);                    // ±12pp
+    const sitWeight    = 10;                                                    // fixed
+    const followWeight = Math.max(0, 8 + moodFactor * 8);                      // happy cats follow more
+    const groomWeight  = Math.max(0, 12 + Math.max(0, moodFactor) * 8);        // happy +8pp
+    const stretchWeight = Math.max(0, 12 + Math.max(0, moodFactor) * 8);       // happy +8pp
+    const sleepWeight  = Math.max(0, 10 + Math.max(0, -moodFactor) * 15);      // sad +15pp
+
+    const total = deferWeight + walkWeight + sitWeight + followWeight + groomWeight + stretchWeight + sleepWeight;
+    const roll = Math.random() * total;
+
+    let acc = deferWeight;
+    if (roll < acc) { this.deferNextDecision(pet); return; }
+    acc += walkWeight;
+    if (roll < acc) { this.startWalking(pet); return; }
+    acc += sitWeight;
+    if (roll < acc) { this.setState(pet, "sit"); return; }
+    acc += followWeight;
+    if (roll < acc) {
+      // Signal to the desktop layer: next walk should head toward the cursor
+      pet.followMouse = true;
       this.startWalking(pet);
       return;
     }
-
-    if (roll < 0.66) {
-      this.setState(pet, "sit");
-      return;
-    }
-
-    if (roll < 0.78) {
-      this.setState(pet, "groom");
-      return;
-    }
-
-    if (roll < 0.9 && this.canStretchFrom(pet.state)) {
-      this.setState(pet, "stretch");
-      return;
-    }
+    acc += groomWeight;
+    if (roll < acc) { this.setState(pet, "groom"); return; }
+    acc += stretchWeight;
+    if (roll < acc && this.canStretchFrom(pet.state)) { this.setState(pet, "stretch"); return; }
 
     this.setState(pet, "sleep");
   }
@@ -229,28 +264,36 @@ export class BehaviorEngine {
     return state === "stretch" || state === "groom" || state === "eat" || state === "sleep_to_idle";
   }
 
-  private randomDecisionDelay(state: PetState): number {
+  private randomDecisionDelay(state: PetState, mood: number): number {
+    const moodFactor = (mood - 50) / 50; // -1 (sad) to +1 (happy)
+    // High mood → shorter delays (more active); low mood → longer delays (lethargic)
+    const speedMultiplier = 1 - moodFactor * 0.4; // 1.4 (sad) to 0.6 (happy)
+
     if (state === "idle") {
-      return this.randomBetween(9000, 22000);
+      return Math.round(this.randomBetween(9000, 22000) * speedMultiplier);
     }
 
     if (state === "sit") {
-      return this.randomBetween(12000, 26000);
+      return Math.round(this.randomBetween(12000, 26000) * speedMultiplier);
     }
 
     if (state === "sleep") {
-      return this.randomBetween(9000, 18000);
+      return Math.round(this.randomBetween(9000, 18000) * speedMultiplier);
     }
 
-    return this.randomBetween(1200, 2400);
+    return Math.round(this.randomBetween(1200, 2400) * speedMultiplier);
   }
 
   private deferNextDecision(pet: PetModel): void {
-    pet.nextDecisionMs = this.randomDecisionDelay(pet.state);
+    pet.nextDecisionMs = this.randomDecisionDelay(pet.state, pet.mood);
   }
 
   private randomBetween(min: number, max: number): number {
     return min + Math.random() * (max - min);
+  }
+
+  private adjustMood(pet: PetModel, delta: number): void {
+    pet.mood = this.clamp(pet.mood + delta, MOOD_MIN, MOOD_MAX);
   }
 
   private canStretchFrom(state: PetState): boolean {

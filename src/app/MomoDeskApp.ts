@@ -101,6 +101,8 @@ export class MomoDeskApp {
     toX: number;
     toY: number;
     returnToIdleOnDone: boolean;
+    /** When true, after walk completes the pet sits and looks at the cursor. */
+    thenSitAndLook?: boolean;
   } | null = null;
   private saveTimerId = 0;
   private rafId = 0;
@@ -147,7 +149,8 @@ export class MomoDeskApp {
       velocity: { x: 0, y: 0 },
       target: { ...defaultPos },
       stateElapsedMs: 0,
-      nextDecisionMs: 1200
+      nextDecisionMs: 1200,
+      mood: 50
     };
     this.lastSavedState = this.pet.state;
 
@@ -233,6 +236,7 @@ export class MomoDeskApp {
     this.resize();
     this.behavior.restorePosition(this.pet, state.position);
     this.behavior.setState(this.pet, this.toRestorableState(state.lastState));
+    this.pet.mood = state.mood ?? 50;
     this.lastSavedState = this.pet.state;
   }
 
@@ -385,7 +389,8 @@ export class MomoDeskApp {
     const state: PetPersistState = {
       position: this.behavior.getPosition(this.pet),
       lastState: this.previewStateUntilMs > 0 ? "idle" : this.pet.state,
-      lastActiveAt: new Date().toISOString()
+      lastActiveAt: new Date().toISOString(),
+      mood: this.pet.mood
     };
 
     await this.tryTauri(() => invoke("save_pet_state", { state }));
@@ -498,7 +503,8 @@ export class MomoDeskApp {
   }
 
   private async updateDesktopAutonomy(deltaMs: number, now: number): Promise<void> {
-    if (this.windowWalkAnimation?.returnToIdleOnDone && this.pet.state === "walk") {
+    if ((this.windowWalkAnimation?.returnToIdleOnDone || this.windowWalkAnimation?.thenSitAndLook)
+        && this.pet.state === "walk") {
       this.pet.stateElapsedMs += deltaMs;
       await this.updateWindowWalk(now);
       return;
@@ -510,7 +516,11 @@ export class MomoDeskApp {
       // set yet, so stateElapsedMs freezes for 1-3 frames. Not user-visible
       // at 60fps and a negligible trade-off vs. the cleaner async flow.
       if (!this.desktopAutonomousWalkStarting) {
-        await this.startAutonomousDesktopWalk(now);
+        if (this.pet.followMouse) {
+          await this.startFollowMouseWalk(now);
+        } else {
+          await this.startAutonomousDesktopWalk(now);
+        }
       }
       return;
     }
@@ -519,7 +529,11 @@ export class MomoDeskApp {
 
     if (updatedState === "walk") {
       if (!this.desktopAutonomousWalkStarting) {
-        await this.startAutonomousDesktopWalk(now);
+        if (this.pet.followMouse) {
+          await this.startFollowMouseWalk(now);
+        } else {
+          await this.startAutonomousDesktopWalk(now);
+        }
       }
       return;
     }
@@ -1197,6 +1211,68 @@ export class MomoDeskApp {
     }
   }
 
+  private async startFollowMouseWalk(now: number): Promise<void> {
+    if (this.desktopAutonomousWalkStarting) {
+      return;
+    }
+    this.desktopAutonomousWalkStarting = true;
+    this.pet.followMouse = false;
+
+    try {
+      const [position, size, cursor, monitor] = await Promise.all([
+        getCurrentWindow().outerPosition(),
+        getCurrentWindow().outerSize(),
+        cursorPosition(),
+        currentMonitor()
+      ]);
+      const bounds = monitor?.workArea ?? monitor;
+
+      // Walk so the cat center ends up ~60px away from the cursor.
+      const directionX = position.x + size.width / 2 < cursor.x ? -1 : 1;
+      const targetX = cursor.x + directionX * 60 - size.width / 2;
+      const targetY = cursor.y - 30 - size.height / 2; // slightly above cursor
+
+      let clampedX = targetX;
+      let clampedY = targetY;
+      if (bounds) {
+        clampedX = this.clamp(targetX, bounds.position.x + 8, bounds.position.x + bounds.size.width - size.width - 8);
+        clampedY = this.clamp(targetY, bounds.position.y + 8, bounds.position.y + bounds.size.height - size.height - 8);
+      }
+
+      const dx = clampedX - position.x;
+      const dy = clampedY - position.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+
+      if (distance < 12) {
+        // Already close enough — just sit and look
+        this.behavior.setState(this.pet, "sit");
+        this.startLookAtMouse(now, MANUAL_LOOK_DURATION_MS);
+        return;
+      }
+
+      this.pet.facing = clampedX < position.x ? "left" : "right";
+      this.windowWalkAnimation = {
+        startedAt: now,
+        durationMs: this.clamp(
+          (distance / AUTONOMOUS_DESKTOP_WALK_SPEED_PX_PER_SECOND) * 1000,
+          1200,
+          4000
+        ),
+        fromX: position.x,
+        fromY: position.y,
+        toX: clampedX,
+        toY: clampedY,
+        returnToIdleOnDone: false,
+        thenSitAndLook: true
+      };
+    } catch (error) {
+      console.warn("Failed to start follow-mouse walk", error);
+      this.behavior.setState(this.pet, "idle");
+    } finally {
+      this.desktopAutonomousWalkStarting = false;
+    }
+  }
+
   private async startAutonomousDesktopWalk(now: number): Promise<void> {
     if (this.desktopAutonomousWalkStarting) {
       return;
@@ -1269,6 +1345,10 @@ export class MomoDeskApp {
     if (progress >= 1 && walk.returnToIdleOnDone) {
       this.windowWalkAnimation = null;
       this.behavior.setState(this.pet, "idle");
+    } else if (progress >= 1 && walk.thenSitAndLook) {
+      this.windowWalkAnimation = null;
+      this.behavior.setState(this.pet, "sit");
+      this.startLookAtMouse(now, MANUAL_LOOK_DURATION_MS);
     }
   }
 

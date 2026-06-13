@@ -232,7 +232,9 @@ export class CanvasPetRenderer {
     const sitSquash = pet.state === "sit" ? 0.92 : 1;
 
     this.ctx.save();
-    this.ctx.translate(0, bob);
+    // Idle body sway — subtle horizontal oscillation
+    const sway = pet.state === "idle" ? Math.sin(now / 2100) * 1.6 : 0;
+    this.ctx.translate(sway, bob);
     this.ctx.scale(1, sleepSquash * sitSquash);
 
     if (pet.state === "sleep") {
@@ -452,14 +454,24 @@ export class CanvasPetRenderer {
     const ctx = this.ctx;
     const headY = pet.state === "stretch" ? -94 : -86;
     const blink = Math.sin(now / 850) > 0.96;
+    // Yawn: mouth opens wide ~1s every ~30s when idle
+    const yawnPhase = Math.sin(now / 32000);
+    const yawning = pet.state === "idle" && yawnPhase > 0.985;
+    const yawnOpen = yawning ? (yawnPhase - 0.985) / 0.015 : 0; // 0→1 in ~1s
+    // Ear twitch: quick subtle flick every few seconds
+    const earTwitch = pet.state === "idle" ? Math.sin(now / 3700 + Math.sin(now / 7100) * 3) * 2.5 : 0;
+
+    // Ear tips shift with twitch
+    const earLX = -40 + earTwitch * (Math.sin(now / 3700) > 0 ? 1 : -1);
+    const earRX = 43 + earTwitch;
 
     ctx.fillStyle = BODY;
     ctx.beginPath();
     ctx.moveTo(-28, headY - 19);
-    ctx.lineTo(-40, headY - 48);
+    ctx.lineTo(earLX, headY - 48);
     ctx.lineTo(-13, headY - 31);
     ctx.lineTo(18, headY - 31);
-    ctx.lineTo(43, headY - 49);
+    ctx.lineTo(earRX, headY - 49);
     ctx.lineTo(33, headY - 17);
     ctx.closePath();
     ctx.fill();
@@ -474,7 +486,7 @@ export class CanvasPetRenderer {
     ctx.fill();
 
     ctx.fillStyle = DARK;
-    if (blink || pet.state === "groom") {
+    if (blink || pet.state === "groom" || yawning) {
       ctx.lineWidth = 3;
       ctx.lineCap = "round";
       ctx.beginPath();
@@ -492,9 +504,10 @@ export class CanvasPetRenderer {
 
     ctx.fillStyle = PINK;
     ctx.beginPath();
-    ctx.moveTo(6, headY + 4);
-    ctx.lineTo(13, headY + 4);
-    ctx.lineTo(9.5, headY + 9);
+    const mouthOpen = yawnOpen * 8; // how much the mouth opens
+    ctx.moveTo(6 - mouthOpen * 0.3, headY + 4);
+    ctx.lineTo(13 + mouthOpen * 0.3, headY + 4);
+    ctx.lineTo(9.5, headY + 9 + mouthOpen);
     ctx.closePath();
     ctx.fill();
 
@@ -503,9 +516,9 @@ export class CanvasPetRenderer {
     ctx.lineCap = "round";
     ctx.beginPath();
     ctx.moveTo(10, headY + 10);
-    ctx.quadraticCurveTo(4, headY + 15, -2, headY + 12);
+    ctx.quadraticCurveTo(4, headY + 15 + mouthOpen * 0.5, -2, headY + 12);
     ctx.moveTo(10, headY + 10);
-    ctx.quadraticCurveTo(17, headY + 16, 25, headY + 12);
+    ctx.quadraticCurveTo(17, headY + 16 + mouthOpen * 0.5, 25, headY + 12);
     ctx.stroke();
 
     this.drawWhiskers(headY);
@@ -513,7 +526,8 @@ export class CanvasPetRenderer {
 
   private drawTail(pet: PetModel, now: number): void {
     const ctx = this.ctx;
-    const wag = Math.sin(now / 230) * (pet.state === "walk" ? 10 : 5);
+    const moodWagMultiplier = 0.3 + ((pet.mood + 50) / 150) * 0.7; // 0.3 (sad) to 1.0 (happy)
+    const wag = Math.sin(now / 230) * (pet.state === "walk" ? 10 : 5) * moodWagMultiplier;
 
     ctx.strokeStyle = BODY;
     ctx.lineWidth = 17;

@@ -98,6 +98,12 @@ struct PetPersistState {
     position: Vec2,
     last_state: String,
     last_active_at: String,
+    #[serde(default = "default_mood")]
+    mood: f64,
+}
+
+fn default_mood() -> f64 {
+    50.0
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

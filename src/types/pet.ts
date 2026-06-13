@@ -36,6 +36,7 @@ export interface PetPersistState {
   position: Vec2;
   lastState: PetState;
   lastActiveAt: string;
+  mood?: number;
 }
 
 export interface PetModel {
@@ -46,4 +47,8 @@ export interface PetModel {
   target: Vec2;
   stateElapsedMs: number;
   nextDecisionMs: number;
+  /** 0-100, higher = happier. Decays during idle, recovers during sleep. */
+  mood: number;
+  /** Internal flag: when true, the next autonomous walk should head toward the cursor. */
+  followMouse?: boolean;
 }
