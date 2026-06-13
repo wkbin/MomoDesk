@@ -113,7 +113,7 @@ export class BehaviorEngine {
 
     if (pet.state === "sleep") {
       if (pet.stateElapsedMs > MIN_SLEEP_DURATION_MS && Math.random() < 0.28) {
-        this.setState(pet, "idle");
+        this.setState(pet, "sleep_to_idle");
         return;
       }
 
@@ -121,20 +121,35 @@ export class BehaviorEngine {
       return;
     }
 
-    if (pet.state !== "idle" && pet.state !== "sit") {
+    if (pet.state === "sit") {
+      // After sitting a while, either go to sleep or stand up
+      if (Math.random() < 0.45) {
+        this.setState(pet, "sleep");
+      } else {
+        this.setState(pet, "idle");
+      }
+      return;
+    }
+
+    if (pet.state !== "idle") {
       this.setState(pet, "idle");
       return;
     }
 
     const roll = Math.random();
 
-    if (roll < 0.48) {
+    if (roll < 0.4) {
       this.deferNextDecision(pet);
       return;
     }
 
-    if (roll < 0.64) {
+    if (roll < 0.56) {
       this.startWalking(pet);
+      return;
+    }
+
+    if (roll < 0.66) {
+      this.setState(pet, "sit");
       return;
     }
 
@@ -157,7 +172,8 @@ export class BehaviorEngine {
 
     if (distance < 2) {
       pet.position.x = pet.target.x;
-      this.setState(pet, "idle");
+      // Sometimes sit after walking instead of going straight to idle
+      this.setState(pet, Math.random() < 0.25 ? "sit" : "idle");
       return;
     }
 
@@ -202,11 +218,15 @@ export class BehaviorEngine {
       return pet.stateElapsedMs > EAT_DURATION_MS;
     }
 
+    if (pet.state === "sleep_to_idle") {
+      return pet.stateElapsedMs > 2500;
+    }
+
     return false;
   }
 
   private isOneShotState(state: PetState): boolean {
-    return state === "stretch" || state === "groom" || state === "eat";
+    return state === "stretch" || state === "groom" || state === "eat" || state === "sleep_to_idle";
   }
 
   private randomDecisionDelay(state: PetState): number {

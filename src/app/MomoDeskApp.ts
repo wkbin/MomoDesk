@@ -1,11 +1,23 @@
 import { invoke } from "@tauri-apps/api/core";
-import { PhysicalPosition, LogicalSize, currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  PhysicalPosition,
+  LogicalSize,
+  currentMonitor,
+  cursorPosition,
+  getCurrentWindow
+} from "@tauri-apps/api/window";
+import { emitTo, listen } from "@tauri-apps/api/event";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { BehaviorEngine } from "../core/BehaviorEngine";
 import { PetPackageLoader } from "../pet-package/PetPackageLoader";
 import { CanvasPetRenderer } from "../renderer/CanvasPetRenderer";
 import { PointerController } from "../interaction/PointerController";
+import { ContextMenu } from "../ui/ContextMenu";
+import type { ContextMenuItem } from "../ui/ContextMenu";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { PetModel, PetPersistState, PetState, Settings } from "../types/pet";
 import type { AnimationKey, PetPackageManifest } from "../types/pet-package";
+import { DEFAULT_SETTINGS } from "../config/settings";
 
 const INITIAL_SIZE = 220;
 const SAVE_INTERVAL_MS = 5000;
@@ -18,6 +30,19 @@ const WALK_LEFT_LOOP_START_FRAME = 39;
 const WALK_LEFT_LOOP_END_FRAME = 86;
 const WALK_RIGHT_LOOP_START_FRAME = 39;
 const WALK_RIGHT_LOOP_END_FRAME = 86;
+const PET_MENU_WINDOW_WIDTH = 176;
+const PET_MENU_WINDOW_HEIGHT = 278;
+const PET_MENU_WINDOW_OFFSET = 10;
+const SETTINGS_WINDOW_WIDTH = 440;
+const SETTINGS_WINDOW_HEIGHT = 680;
+const CHAT_WINDOW_WIDTH = 218;
+const CHAT_WINDOW_HEIGHT = 64;
+const CHAT_WINDOW_GAP = 14;
+const AUTO_LOOK_MIN_DELAY_MS = 18000;
+const AUTO_LOOK_MAX_DELAY_MS = 42000;
+const AUTO_LOOK_MIN_DURATION_MS = 2200;
+const AUTO_LOOK_MAX_DURATION_MS = 4800;
+const MANUAL_LOOK_DURATION_MS = 8000;
 const TAURI_AVAILABLE = "__TAURI_INTERNALS__" in window;
 const DEFAULT_STATIC_IMAGE_URL = new URL(
   "../../assets/pets/default/preview/cat_static.png",
@@ -37,14 +62,6 @@ const DEFAULT_PET_FRAME_ASSETS = import.meta.glob(
   }
 ) as Record<string, string>;
 
-const DEFAULT_SETTINGS: Settings = {
-  autostart: false,
-  soundEnabled: true,
-  activeLevel: "normal",
-  scale: 1,
-  alwaysOnTop: true,
-  skinId: "default"
-};
 const RESTORABLE_STATES = new Set<PetState>([
   "idle",
   "walk",
@@ -65,6 +82,14 @@ export class MomoDeskApp {
   private readonly pet: PetModel;
   private petPackage: PetPackageManifest | null = null;
   private settings: Settings = DEFAULT_SETTINGS;
+  private contextMenu: ContextMenu | null = null;
+  private contextMenuItems: ContextMenuItem[] = [];
+  private menuWindow: WebviewWindow | null = null;
+  private chatWindow: WebviewWindow | null = null;
+  private settingsWindow: WebviewWindow | null = null;
+  private menuActionUnlisten: UnlistenFn | null = null;
+  private settingsSyncUnlisten: UnlistenFn | null = null;
+  private menuWindowOpening = false;
   private lastFrame = performance.now();
   private lastSavedState: PetState;
   private previewStateUntilMs = 0;
@@ -79,6 +104,11 @@ export class MomoDeskApp {
   } | null = null;
   private saveTimerId = 0;
   private rafId = 0;
+  /** Click-through: when true, mouse events pass through the window to the desktop */
+  private clickThroughEnabled = false;
+  private lastClickThroughCheck = 0;
+  private readonly CLICK_THROUGH_POLL_MS = 150;
+  private readonly CLICK_THROUGH_HIT_RADIUS = 72;
   private desktopDragOrigin: {
     pointerX: number;
     pointerY: number;
@@ -94,6 +124,17 @@ export class MomoDeskApp {
   private pendingDesktopWindowPosition: { x: number; y: number } | null = null;
   private desktopWindowMoveInFlight = false;
   private desktopAutonomousWalkStarting = false;
+  private mouseCanvasX = 0;
+  private mouseCanvasY = 0;
+  private mouseInCanvas = false;
+  private desktopMouseDx = 0;
+  private desktopMouseDy = 0;
+  private desktopMouseAvailable = false;
+  private desktopMouseUpdateInFlight = false;
+  private lookAtMouseUntilMs = 0;
+  private nextAutoLookAtMouseMs = performance.now() + 12000;
+  private readonly LOOK_RADIUS = 130;
+  private readonly LOOK_INNER_DEAD_ZONE = 28;
 
   constructor(private readonly canvas: HTMLCanvasElement) {
     const floorY = INITIAL_SIZE * 0.74;
@@ -130,8 +171,14 @@ export class MomoDeskApp {
     await this.applyPetPackage();
     await this.restoreDesktopState();
 
+    this.initContextMenu();
+    this.attachMenuWindowEvents();
+
     window.addEventListener("resize", () => this.resize());
     window.addEventListener("keydown", this.onPreviewKeyDown);
+    this.canvas.addEventListener("contextmenu", this.onContextMenu);
+    this.canvas.addEventListener("pointermove", this.onPointerMove);
+    this.canvas.addEventListener("pointerleave", this.onPointerLeave);
     this.attachTrayEvents();
     this.pointer.attach();
     this.canvas.addEventListener("pointerup", this.onPointerPersist);
@@ -139,15 +186,39 @@ export class MomoDeskApp {
       void this.savePetState();
     }, SAVE_INTERVAL_MS);
     this.loop(this.lastFrame);
+    // Wait for the first frame to paint before showing the window,
+    // avoiding a brief scrollbar/flash during WebView initialization.
+    await this.waitForFirstFrame();
     await this.showDesktopWindow();
+    // Start with click-through enabled — polling will disable it when mouse is near the cat
+    if (TAURI_AVAILABLE) {
+      await invoke("set_click_through", { ignore: true }).catch(() => {});
+      this.clickThroughEnabled = true;
+      await this.ensureWindowOnScreen();
+    }
   }
 
   stop(): void {
     window.cancelAnimationFrame(this.rafId);
     window.clearInterval(this.saveTimerId);
     window.removeEventListener("keydown", this.onPreviewKeyDown);
+    this.canvas.removeEventListener("contextmenu", this.onContextMenu);
+    this.canvas.removeEventListener("pointermove", this.onPointerMove);
+    this.canvas.removeEventListener("pointerleave", this.onPointerLeave);
     this.canvas.removeEventListener("pointerup", this.onPointerPersist);
     this.pointer.detach();
+    this.contextMenu?.destroy();
+    this.contextMenu = null;
+    this.menuActionUnlisten?.();
+    this.menuActionUnlisten = null;
+    this.settingsSyncUnlisten?.();
+    this.settingsSyncUnlisten = null;
+    void this.menuWindow?.hide();
+    this.menuWindow = null;
+    void this.chatWindow?.hide();
+    this.chatWindow = null;
+    void this.settingsWindow?.hide();
+    this.settingsWindow = null;
     void this.savePetState();
   }
 
@@ -202,6 +273,9 @@ export class MomoDeskApp {
     await this.safeTauri(() =>
       window.setSize(new LogicalSize(this.getScaledSize(), this.getScaledSize()))
     );
+    if (this.settings.alwaysOnTop) {
+      await this.ensurePetWindowAlwaysOnTop();
+    }
   }
 
   private async applyPetPackage(): Promise<void> {
@@ -344,6 +418,20 @@ export class MomoDeskApp {
       this.behavior.sleep(this.pet);
       void this.savePetState();
     });
+
+    void window.listen("tray-quit", () => {
+      void this.savePetState();
+      window.close();
+    });
+
+    void window.listen<Settings>("settings-updated", (event) => {
+      this.settings = event.payload;
+      void this.applySettings();
+      this.initContextMenu();
+    }).then((unlisten) => {
+      this.settingsSyncUnlisten?.();
+      this.settingsSyncUnlisten = unlisten;
+    });
   }
 
   private resize(): void {
@@ -377,8 +465,10 @@ export class MomoDeskApp {
     }
     this.keepPetAnchoredInDesktopWindow();
     this.keepDesktopPreviewInIdle();
+    void this.updateLookAtMouse();
     this.renderer.render(this.pet, now);
     this.saveOnStateChange();
+    this.updateClickThrough(now);
 
     this.rafId = window.requestAnimationFrame(this.loop);
   };
@@ -399,6 +489,11 @@ export class MomoDeskApp {
       return;
     }
 
+    // sleep_to_idle is a transient one-shot; let it play out
+    if (this.pet.state === "sleep_to_idle") {
+      return;
+    }
+
     this.behavior.setState(this.pet, "idle");
   }
 
@@ -410,6 +505,10 @@ export class MomoDeskApp {
     }
 
     if (this.pet.state === "walk") {
+      // NOTE: during the async gap of startAutonomousDesktopWalk (Tauri IPC),
+      // deskAutonomousWalkStarting is true but windowWalkAnimation may not be
+      // set yet, so stateElapsedMs freezes for 1-3 frames. Not user-visible
+      // at 60fps and a negligible trade-off vs. the cleaner async flow.
       if (!this.desktopAutonomousWalkStarting) {
         await this.startAutonomousDesktopWalk(now);
       }
@@ -444,6 +543,7 @@ export class MomoDeskApp {
     this.previewStateUntilMs = 0;
     this.windowWalkAnimation = null;
     this.desktopAutonomousWalkStarting = false;
+    this.stopLookAtMouse();
   }
 
   private getDesktopOneShotDurationMs(state: PetState): number | null {
@@ -461,6 +561,10 @@ export class MomoDeskApp {
 
     if (state === "eat") {
       return this.renderer.getFrameAnimationDurationMs("eat") ?? 10050;
+    }
+
+    if (state === "sleep_to_idle") {
+      return this.renderer.getFrameAnimationDurationMs("sleep_to_idle") ?? 2500;
     }
 
     return null;
@@ -506,6 +610,543 @@ export class MomoDeskApp {
       this.behavior.setState(this.pet, "idle");
     }
   };
+
+  private initContextMenu(): void {
+    this.contextMenu?.destroy();
+
+    const items = this.getContextMenuItems();
+    this.contextMenuItems = items;
+    this.contextMenu = new ContextMenu({
+      items
+    });
+  }
+
+  private getContextMenuItems(): ContextMenuItem[] {
+    return [
+      {
+        id: "feed",
+        label: "喂食",
+        icon: "🐟",
+        action: () => {
+          this.cancelDesktopMotion();
+          this.behavior.feed(this.pet);
+          void this.savePetState();
+        }
+      },
+      {
+        id: "sleep",
+        label: "睡觉",
+        icon: "💤",
+        action: () => {
+          this.cancelDesktopMotion();
+          this.behavior.sleep(this.pet);
+          void this.savePetState();
+        }
+      },
+      {
+        id: "recall",
+        label: "召回",
+        icon: "🏠",
+        action: () => {
+          this.cancelDesktopMotion();
+          this.behavior.restorePosition(this.pet, {
+            x: INITIAL_SIZE / 2,
+            y: INITIAL_SIZE * 0.74
+          });
+          this.behavior.setState(this.pet, "idle");
+          void this.savePetState();
+        }
+      },
+      {
+        id: "chat",
+        label: "聊天",
+        icon: "💬",
+        action: () => {
+          window.setTimeout(() => {
+            void this.openChatBubbleWindow();
+          }, 10);
+        }
+      },
+      {
+        id: "play",
+        label: "看我",
+        icon: "👋",
+        action: () => {
+          this.startLookAtMouse(performance.now(), MANUAL_LOOK_DURATION_MS);
+          void this.savePetState();
+        }
+      },
+      { id: "__separator__", label: "", icon: "", action: () => {} },
+      {
+        id: "settings",
+        label: "设置",
+        icon: "⚙️",
+        action: () => {
+          void this.openSettingsWindow();
+        }
+      },
+      {
+        id: "quit",
+        label: "退出",
+        icon: "🚪",
+        action: () => {
+          this.stop();
+          window.close();
+        }
+      }
+    ];
+  }
+
+  private attachMenuWindowEvents(): void {
+    if (!TAURI_AVAILABLE) {
+      return;
+    }
+
+    void listen<string>("pet-menu-action", (event) => {
+      const item = this.contextMenuItems.find((menuItem) => menuItem.id === event.payload);
+      item?.action();
+    }).then((unlisten) => {
+      this.menuActionUnlisten?.();
+      this.menuActionUnlisten = unlisten;
+    });
+  }
+
+  private onContextMenu = (event: MouseEvent): void => {
+    event.preventDefault();
+
+    // Only show context menu when clicking on the pet (hit test)
+    const rect = this.canvas.getBoundingClientRect();
+    const ratio = window.devicePixelRatio || 1;
+    const point = {
+      x: (event.clientX - rect.left) * (this.canvas.width / ratio / rect.width),
+      y: (event.clientY - rect.top) * (this.canvas.height / ratio / rect.height)
+    };
+
+    // Check if click is on the pet or nearby
+    const dx = point.x - this.pet.position.x;
+    const dy = point.y - this.pet.position.y;
+    const hitRadius = 72;
+    const hit = dx * dx + dy * dy < hitRadius * hitRadius;
+
+    if (!hit) {
+      return;
+    }
+
+    if (TAURI_AVAILABLE) {
+      void this.openDesktopContextMenu(event.clientX, event.clientY);
+      return;
+    }
+
+    this.contextMenu?.open(event.clientX, event.clientY);
+  };
+
+  private async openDesktopContextMenu(fallbackX: number, fallbackY: number): Promise<void> {
+    if (this.menuWindowOpening) {
+      return;
+    }
+
+    this.menuWindowOpening = true;
+    try {
+      const menuWindow = await this.getOrCreateMenuWindow();
+      const position = await this.getDesktopMenuPosition();
+      await menuWindow.setPosition(new PhysicalPosition(position.x, position.y));
+      await menuWindow.show();
+      await menuWindow.setFocus();
+    } catch (error) {
+      console.warn("Failed to open desktop pet menu", error);
+      this.contextMenu?.open(fallbackX, fallbackY);
+    } finally {
+      this.menuWindowOpening = false;
+    }
+  }
+
+  private async getOrCreateMenuWindow(): Promise<WebviewWindow> {
+    const existing = this.menuWindow ?? (await WebviewWindow.getByLabel("pet-menu"));
+    if (existing) {
+      this.menuWindow = existing;
+      return existing;
+    }
+
+    const menuWindow = new WebviewWindow("pet-menu", {
+      url: this.getMenuWindowUrl(),
+      title: "Momo 的小菜单",
+      width: PET_MENU_WINDOW_WIDTH,
+      height: PET_MENU_WINDOW_HEIGHT,
+      visible: false,
+      decorations: false,
+      transparent: true,
+      backgroundColor: "#00000000",
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      resizable: false,
+      maximizable: false,
+      minimizable: false,
+      focus: false,
+      shadow: false
+    });
+    this.menuWindow = menuWindow;
+
+    await Promise.race([
+      new Promise<void>((resolve, reject) => {
+        void menuWindow.once("tauri://created", () => resolve());
+        void menuWindow.once("tauri://error", (event) => reject(event.payload));
+      }),
+      new Promise<void>((resolve) => window.setTimeout(resolve, 600))
+    ]);
+
+    return menuWindow;
+  }
+
+  private getMenuWindowUrl(): string {
+    const url = new URL(window.location.href);
+    url.search = "view=pet-menu";
+    url.hash = "";
+    return url.href;
+  }
+
+  private async openSettingsWindow(): Promise<void> {
+    if (!TAURI_AVAILABLE) {
+      return;
+    }
+
+    const settingsWindow = await this.getOrCreateSettingsWindow();
+    await settingsWindow.show();
+    await settingsWindow.setFocus();
+  }
+
+  private async getOrCreateSettingsWindow(): Promise<WebviewWindow> {
+    const existing = this.settingsWindow ?? (await WebviewWindow.getByLabel("settings"));
+    if (existing) {
+      this.settingsWindow = existing;
+      return existing;
+    }
+
+    const settingsWindow = new WebviewWindow("settings", {
+      url: this.getSettingsWindowUrl(),
+      title: "Momo 设置",
+      width: SETTINGS_WINDOW_WIDTH,
+      height: SETTINGS_WINDOW_HEIGHT,
+      visible: false,
+      decorations: true,
+      transparent: false,
+      backgroundColor: "#fff8ef",
+      alwaysOnTop: false,
+      skipTaskbar: false,
+      resizable: true,
+      maximizable: false,
+      minimizable: true,
+      focus: true,
+      center: true
+    });
+    this.settingsWindow = settingsWindow;
+
+    await Promise.race([
+      new Promise<void>((resolve, reject) => {
+        void settingsWindow.once("tauri://created", () => resolve());
+        void settingsWindow.once("tauri://error", (event) => reject(event.payload));
+      }),
+      new Promise<void>((resolve) => window.setTimeout(resolve, 600))
+    ]);
+
+    return settingsWindow;
+  }
+
+  private getSettingsWindowUrl(): string {
+    const url = new URL(window.location.href);
+    url.search = "view=settings";
+    url.hash = "";
+    return url.href;
+  }
+
+  private async openChatBubbleWindow(): Promise<void> {
+    if (!TAURI_AVAILABLE) {
+      return;
+    }
+
+    try {
+      const chatWindow = await this.getOrCreateChatBubbleWindow();
+      await emitTo("chat-bubble", "chat-open-input");
+      const position = await this.getDesktopChatBubblePosition();
+      await chatWindow.setPosition(new PhysicalPosition(position.x, position.y));
+      await chatWindow.show();
+      await chatWindow.setFocus();
+    } catch (error) {
+      console.warn("Failed to open chat bubble", error);
+    }
+  }
+
+  private async getOrCreateChatBubbleWindow(): Promise<WebviewWindow> {
+    const existing = this.chatWindow ?? (await WebviewWindow.getByLabel("chat-bubble"));
+    if (existing) {
+      this.chatWindow = existing;
+      return existing;
+    }
+
+    const chatWindow = new WebviewWindow("chat-bubble", {
+      url: this.getChatBubbleWindowUrl(),
+      title: "Momo 聊天气泡",
+      width: CHAT_WINDOW_WIDTH,
+      height: CHAT_WINDOW_HEIGHT,
+      visible: false,
+      decorations: false,
+      transparent: true,
+      backgroundColor: "#00000000",
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      resizable: false,
+      maximizable: false,
+      minimizable: false,
+      focus: true,
+      shadow: false
+    });
+    this.chatWindow = chatWindow;
+
+    try {
+      await Promise.race([
+        new Promise<void>((resolve, reject) => {
+          void chatWindow.once("tauri://created", () => resolve());
+          void chatWindow.once("tauri://error", (event) => reject(event.payload));
+        }),
+        new Promise<void>((_, reject) =>
+          window.setTimeout(() => reject(new Error("Window creation timed out after 3s")), 3000)
+        )
+      ]);
+    } catch (err) {
+      console.warn("Chat bubble window ready wait failed", err);
+      // Still return the window — it may work anyway
+    }
+
+    return chatWindow;
+  }
+
+  private getChatBubbleWindowUrl(): string {
+    return `/?view=chat-bubble`;
+  }
+
+  private async getDesktopMenuPosition(): Promise<{ x: number; y: number }> {
+    const cursor = await cursorPosition();
+    const monitor = await currentMonitor();
+    const bounds = monitor?.workArea ?? monitor;
+    let x = cursor.x + PET_MENU_WINDOW_OFFSET;
+    let y = cursor.y + PET_MENU_WINDOW_OFFSET;
+
+    if (bounds) {
+      const minX = bounds.position.x + PET_MENU_WINDOW_OFFSET;
+      const minY = bounds.position.y + PET_MENU_WINDOW_OFFSET;
+      const maxX =
+        bounds.position.x + bounds.size.width - PET_MENU_WINDOW_WIDTH - PET_MENU_WINDOW_OFFSET;
+      const maxY =
+        bounds.position.y + bounds.size.height - PET_MENU_WINDOW_HEIGHT - PET_MENU_WINDOW_OFFSET;
+      x = this.clamp(x, minX, maxX);
+      y = this.clamp(y, minY, maxY);
+    }
+
+    return {
+      x: Math.round(x),
+      y: Math.round(y)
+    };
+  }
+
+  private async getDesktopChatBubblePosition(): Promise<{
+    x: number;
+    y: number;
+  }> {
+    const monitor = await currentMonitor();
+    const bounds = monitor?.workArea ?? monitor;
+    const petWindow = getCurrentWindow();
+    const [windowPosition, windowSize] = await Promise.all([
+      petWindow.outerPosition(),
+      petWindow.outerSize()
+    ]);
+
+    const centerX = windowPosition.x + windowSize.width / 2;
+    const preferRight = !bounds || centerX < bounds.position.x + bounds.size.width / 2;
+
+    let x = preferRight
+      ? windowPosition.x + windowSize.width + CHAT_WINDOW_GAP
+      : windowPosition.x - CHAT_WINDOW_WIDTH - CHAT_WINDOW_GAP;
+    let y = windowPosition.y + windowSize.height - CHAT_WINDOW_HEIGHT - 6;
+
+    if (bounds) {
+      const minX = bounds.position.x + 8;
+      const maxX = bounds.position.x + bounds.size.width - CHAT_WINDOW_WIDTH - 8;
+      const minY = bounds.position.y + 8;
+      const maxY = bounds.position.y + bounds.size.height - CHAT_WINDOW_HEIGHT - 8;
+
+      if (x < minX || x > maxX) {
+        x = preferRight
+          ? windowPosition.x - CHAT_WINDOW_WIDTH - CHAT_WINDOW_GAP
+          : windowPosition.x + windowSize.width + CHAT_WINDOW_GAP;
+        if (x < minX || x > maxX) {
+          x = preferRight
+          ? windowPosition.x + windowSize.width + CHAT_WINDOW_GAP
+          : windowPosition.x - CHAT_WINDOW_WIDTH - CHAT_WINDOW_GAP;
+        }
+      }
+
+      x = this.clamp(x, minX, maxX);
+      y = this.clamp(y, minY, maxY);
+    }
+
+    return {
+      x: Math.round(x),
+      y: Math.round(y)
+    };
+  }
+
+  private onPointerMove = (event: PointerEvent): void => {
+    const point = this.getCanvasPoint(event);
+    this.mouseInCanvas = true;
+    this.mouseCanvasX = point.x;
+    this.mouseCanvasY = point.y;
+  };
+
+  private onPointerLeave = (): void => {
+    this.mouseInCanvas = false;
+  };
+
+  private async updateLookAtMouse(): Promise<void> {
+    if (!this.renderer.hasLookAnimation()) {
+      return;
+    }
+
+    const now = performance.now();
+    this.maybeStartAutoLookAtMouse(now);
+
+    if (!this.canLookAtMouse(now)) {
+      this.renderer.setLookFrame(-1);
+      return;
+    }
+
+    let dx: number;
+    let dy: number;
+    let dist: number;
+
+    if (TAURI_AVAILABLE) {
+      await this.updateDesktopMouseCanvasPoint();
+      if (!this.desktopMouseAvailable) {
+        this.renderer.setLookFrame(-1);
+        return;
+      }
+      dx = this.desktopMouseDx;
+      dy = this.desktopMouseDy;
+      dist = Math.sqrt(dx * dx + dy * dy);
+    } else {
+      if (!this.mouseInCanvas) {
+        this.renderer.setLookFrame(-1);
+        return;
+      }
+
+      dx = this.mouseCanvasX - this.pet.position.x;
+      dy = this.mouseCanvasY - this.pet.position.y;
+      dist = Math.sqrt(dx * dx + dy * dy);
+
+      if (dist > this.LOOK_RADIUS) {
+        this.renderer.setLookFrame(-1);
+        return;
+      }
+    }
+
+    if (dist < this.LOOK_INNER_DEAD_ZONE) {
+      return;
+    }
+
+    const frameCount = this.renderer.getLookFrameCount();
+    if (frameCount <= 0) {
+      this.renderer.setLookFrame(-1);
+      return;
+    }
+
+    const angleDeg = this.getClockwiseLookAngleFromUp(dx, dy);
+    const frameIndex = Math.round((angleDeg / 360) * frameCount) % frameCount;
+
+    this.renderer.setLookFrame(frameIndex);
+  }
+
+  private maybeStartAutoLookAtMouse(now: number): void {
+    if (this.lookAtMouseUntilMs > now || now < this.nextAutoLookAtMouseMs) {
+      return;
+    }
+
+    this.nextAutoLookAtMouseMs = now + this.randomBetween(AUTO_LOOK_MIN_DELAY_MS, AUTO_LOOK_MAX_DELAY_MS);
+
+    if (!this.canStartLookAtMouse()) {
+      return;
+    }
+
+    if (Math.random() < 0.45) {
+      this.startLookAtMouse(now, this.randomBetween(AUTO_LOOK_MIN_DURATION_MS, AUTO_LOOK_MAX_DURATION_MS));
+    }
+  }
+
+  private startLookAtMouse(now: number, durationMs: number): void {
+    if (!this.canStartLookAtMouse()) {
+      return;
+    }
+
+    this.lookAtMouseUntilMs = now + durationMs;
+    this.nextAutoLookAtMouseMs = now + durationMs + this.randomBetween(AUTO_LOOK_MIN_DELAY_MS, AUTO_LOOK_MAX_DELAY_MS);
+  }
+
+  private stopLookAtMouse(): void {
+    this.lookAtMouseUntilMs = 0;
+    this.renderer.setLookFrame(-1);
+  }
+
+  private canLookAtMouse(now: number): boolean {
+    return this.lookAtMouseUntilMs > now && this.canStartLookAtMouse();
+  }
+
+  private canStartLookAtMouse(): boolean {
+    return (this.pet.state === "idle" || this.pet.state === "sit") && this.previewStateUntilMs === 0;
+  }
+
+  private getClockwiseLookAngleFromUp(dx: number, dy: number): number {
+    const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+    return (angle + 90 + 360) % 360;
+  }
+
+  private randomBetween(min: number, max: number): number {
+    return min + Math.random() * (max - min);
+  }
+
+  private getCanvasPoint(event: MouseEvent): { x: number; y: number } {
+    const rect = this.canvas.getBoundingClientRect();
+    const ratio = window.devicePixelRatio || 1;
+    return {
+      x: (event.clientX - rect.left) * (this.canvas.width / ratio / rect.width),
+      y: (event.clientY - rect.top) * (this.canvas.height / ratio / rect.height)
+    };
+  }
+
+  private async updateDesktopMouseCanvasPoint(): Promise<void> {
+    if (this.desktopMouseUpdateInFlight) {
+      return;
+    }
+
+    this.desktopMouseUpdateInFlight = true;
+    try {
+      const window = getCurrentWindow();
+      const [mouse, position, size] = await Promise.all([
+        cursorPosition(),
+        window.outerPosition(),
+        window.outerSize()
+      ]);
+      const displayWidth = Math.max(1, size.width);
+      const displayHeight = Math.max(1, size.height);
+      const catScreenX = position.x + displayWidth * (this.pet.position.x / INITIAL_SIZE);
+      const catScreenY = position.y + displayHeight * (this.pet.position.y / INITIAL_SIZE);
+
+      this.desktopMouseDx = mouse.x - catScreenX;
+      this.desktopMouseDy = mouse.y - catScreenY;
+      this.desktopMouseAvailable = true;
+    } catch (error) {
+      this.desktopMouseAvailable = false;
+      console.warn("Failed to update desktop cursor position", error);
+    } finally {
+      this.desktopMouseUpdateInFlight = false;
+    }
+  }
 
   private async playPreviewWalk(facing: "left" | "right"): Promise<void> {
     this.pet.facing = facing;
@@ -635,6 +1276,7 @@ export class MomoDeskApp {
     this.previewStateUntilMs = 0;
     this.windowWalkAnimation = null;
     this.desktopAutonomousWalkStarting = false;
+    this.stopLookAtMouse();
 
     void this.safeTauri(async () => {
       const window = getCurrentWindow();
@@ -715,7 +1357,9 @@ export class MomoDeskApp {
       return "idle";
     }
 
-    return state === "drag" ? "fall" : state;
+    return state === "drag" ? "fall"
+      : state === "sleep_to_idle" ? "idle"
+      : state;
   }
 
   private getScaledSize(): number {
@@ -754,11 +1398,105 @@ export class MomoDeskApp {
     }
   }
 
+  private async updateClickThrough(now: number): Promise<void> {
+    if (!TAURI_AVAILABLE) {
+      return;
+    }
+    if (now - this.lastClickThroughCheck < this.CLICK_THROUGH_POLL_MS) {
+      return;
+    }
+    this.lastClickThroughCheck = now;
+
+    try {
+      const cursor = await cursorPosition();
+      const petWindow = getCurrentWindow();
+      const windowPos = await petWindow.outerPosition();
+      const scale = this.settings.scale;
+
+      // Cursor position relative to the window
+      const relX = cursor.x - windowPos.x;
+      const relY = cursor.y - windowPos.y;
+
+      // Cat center in window coordinates (scaled)
+      const catCx = this.pet.position.x * scale;
+      const catCy = this.pet.position.y * scale;
+      const radius = this.CLICK_THROUGH_HIT_RADIUS * scale;
+
+      const dx = relX - catCx;
+      const dy = relY - catCy;
+      const nearCat = dx * dx + dy * dy < radius * radius;
+
+      // Keep click-through OFF when dragging or cursor is near the cat
+      const shouldIgnore = !nearCat && this.pet.state !== "drag";
+
+      if (shouldIgnore !== this.clickThroughEnabled) {
+        this.clickThroughEnabled = shouldIgnore;
+        await invoke("set_click_through", { ignore: shouldIgnore });
+      }
+    } catch {
+      // Silently ignore — polling may fail transiently
+    }
+  }
+
+  private async waitForFirstFrame(): Promise<void> {
+    return new Promise((resolve) => {
+      // Two rAF cycles ensure at least one full paint cycle completes
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => resolve());
+      });
+    });
+  }
+
+  private async ensureWindowOnScreen(): Promise<void> {
+    try {
+      const window = getCurrentWindow();
+      const [position, monitor] = await Promise.all([
+        window.outerPosition(),
+        currentMonitor()
+      ]);
+      const bounds = monitor?.workArea ?? monitor;
+      if (!bounds) {
+        return;
+      }
+
+      // Check if the window center is within any reasonable area of the monitor
+      const cx = position.x + INITIAL_SIZE / 2;
+      const cy = position.y + INITIAL_SIZE / 2;
+      const margin = 40;
+      const onScreen =
+        cx >= bounds.position.x + margin &&
+        cx <= bounds.position.x + bounds.size.width - margin &&
+        cy >= bounds.position.y + margin &&
+        cy <= bounds.position.y + bounds.size.height - margin;
+
+      if (!onScreen) {
+        // Window is off-screen (e.g., monitor was disconnected) — center it
+        await window.center();
+      }
+    } catch {
+      // Non-critical — window may just appear in a default position
+    }
+  }
+
   private async showDesktopWindow(): Promise<void> {
     if (!TAURI_AVAILABLE) {
       return;
     }
 
-    await this.safeTauri(() => getCurrentWindow().show());
+    await this.safeTauri(async () => {
+      const window = getCurrentWindow();
+      await window.show();
+      if (this.settings.alwaysOnTop) {
+        await window.setAlwaysOnTop(true);
+      }
+    });
+  }
+
+  private async ensurePetWindowAlwaysOnTop(): Promise<void> {
+    await this.safeTauri(async () => {
+      const window = getCurrentWindow();
+      await window.setAlwaysOnTop(false);
+      await window.setAlwaysOnTop(true);
+    }, "Failed to refresh pet window always-on-top state");
   }
 }

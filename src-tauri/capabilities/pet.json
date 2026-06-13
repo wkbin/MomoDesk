@@ -2,9 +2,11 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "pet-window",
   "description": "Allow the desktop pet window to manage its own shell behavior.",
-  "windows": ["pet"],
+  "windows": ["pet", "pet-menu", "settings", "chat-bubble"],
   "permissions": [
     "core:default",
+    "core:window:allow-create",
+    "core:window:allow-hide",
     "core:window:allow-start-dragging",
     "core:window:allow-set-always-on-top",
     "core:window:allow-set-background-color",
@@ -12,7 +14,11 @@
     "core:window:allow-set-position",
     "core:window:allow-set-size",
     "core:window:allow-show",
+    "core:window:allow-is-visible",
     "core:window:allow-set-focus",
-    "core:webview:allow-set-webview-background-color"
+    "core:window:allow-set-ignore-cursor-events",
+    "core:webview:allow-create-webview-window",
+    "core:webview:allow-set-webview-background-color",
+    "global-shortcut:default"
   ]
 }

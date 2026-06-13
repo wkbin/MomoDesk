@@ -1,0 +1,18 @@
+{
+  "action": "sleep_to_idle",
+  "displayName": "Sleep To Idle",
+  "fps": 24,
+  "loop": false,
+  "frameWidth": 256,
+  "frameHeight": 256,
+  "anchor": {
+    "x": 0.5,
+    "y": 0.92
+  },
+  "source": "source/sleep_to_idle.mp4",
+  "frames": "frames/sleep_to_idle_*.png",
+  "preview": "preview/sleep_to_idle.webp",
+  "required": false,
+  "transition": "sleep_to_idle",
+  "notes": "User-provided transition from sleeping pose back to idle/sitting pose. Edge-connected black background converted to alpha while preserving internal dark eyes and line art; isolated background flecks removed."
+}

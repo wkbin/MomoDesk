@@ -62,6 +62,12 @@
       "source": "actions/sleep/source/sleep.mp4",
       "frames": "actions/sleep/frames/sleep_*.png"
     },
+    "sleep_to_idle": {
+      "fps": 24,
+      "loop": false,
+      "source": "actions/sleep_to_idle/source/sleep_to_idle.mp4",
+      "frames": "actions/sleep_to_idle/frames/sleep_to_idle_*.png"
+    },
     "stretch": {
       "fps": 24,
       "loop": false,
@@ -93,6 +99,12 @@
       "loop": false,
       "source": "actions/eat/source/eat.mp4",
       "frames": "actions/eat/frames/eat_*.png"
+    },
+    "look": {
+      "fps": 24,
+      "loop": false,
+      "source": "actions/look/source/look.mp4",
+      "frames": "actions/look/frames/look_*.png"
     }
   }
 }

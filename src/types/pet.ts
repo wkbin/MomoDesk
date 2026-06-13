@@ -3,6 +3,7 @@ export type PetState =
   | "walk"
   | "sit"
   | "sleep"
+  | "sleep_to_idle"
   | "stretch"
   | "groom"
   | "eat"
@@ -23,6 +24,12 @@ export interface Settings {
   scale: number;
   alwaysOnTop: boolean;
   skinId: string;
+  llmProvider: "deepseek" | "openai" | "ollama" | "custom";
+  apiBaseUrl: string;
+  apiKey: string;
+  model: string;
+  personaPreset: "tsundere" | "clingy" | "cool";
+  customSystemPrompt: string;
 }
 
 export interface PetPersistState {

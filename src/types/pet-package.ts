@@ -7,11 +7,13 @@ export type AnimationKey =
   | "sit"
   | "sit_idle"
   | "sleep"
+  | "sleep_to_idle"
   | "stretch"
   | "groom"
   | "eat"
   | "drag"
-  | "fall";
+  | "fall"
+  | "look";
 
 export interface PetPackageAnchor {
   x: number;

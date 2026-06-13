@@ -38,6 +38,11 @@ export class PointerController {
   }
 
   private onPointerDown = (event: PointerEvent): void => {
+    // Ignore right-click (button === 2) — handled by context menu
+    if (event.button === 2) {
+      return;
+    }
+
     const point = this.getCanvasPoint(event);
     if (!this.hitTest(point)) {
       return;

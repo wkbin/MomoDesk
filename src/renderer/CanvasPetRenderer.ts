@@ -36,6 +36,8 @@ export class CanvasPetRenderer {
   private staticImageLoaded = false;
   private staticImageSrc: string | null = null;
   private readonly frameAnimations = new Map<AnimationKey, LoadedFrameAnimation>();
+  private lookFrameIndex = 0;
+  private isLookMode = false;
   private width = 0;
   private height = 0;
 
@@ -150,6 +152,13 @@ export class CanvasPetRenderer {
 
     this.ctx.save();
     this.ctx.translate(pet.position.x, pet.position.y);
+
+    // "Look" state: draw a specific look frame instead of normal rendering
+    if (this.isLookMode && this.drawLookFrame()) {
+      this.ctx.restore();
+      return;
+    }
+
     if (this.drawFrameAnimation(pet)) {
       this.clearStaticImageFallback();
       // Frame animation handled the current state.
@@ -167,6 +176,43 @@ export class CanvasPetRenderer {
       this.drawCat(pet, now);
     }
     this.ctx.restore();
+  }
+
+  /** Set which look frame to draw, and enable look mode. Pass -1 to disable. */
+  setLookFrame(index: number): void {
+    if (index < 0) {
+      this.isLookMode = false;
+      return;
+    }
+    this.lookFrameIndex = index;
+    this.isLookMode = true;
+  }
+
+  /** Check if the look animation is loaded. */
+  hasLookAnimation(): boolean {
+    const anim = this.frameAnimations.get("look");
+    return Boolean(anim && anim.frames.length > 0);
+  }
+
+  getLookFrameCount(): number {
+    return this.frameAnimations.get("look")?.frames.length ?? 0;
+  }
+
+  /** Draw the single look frame at the current lookFrameIndex. */
+  private drawLookFrame(): boolean {
+    const anim = this.frameAnimations.get("look");
+    if (!anim || anim.frames.length === 0) {
+      return false;
+    }
+
+    const idx = Math.max(0, Math.min(this.lookFrameIndex, anim.frames.length - 1));
+    const frame = anim.frames[idx];
+    if (!frame || !frame.complete || frame.naturalWidth === 0) {
+      return false;
+    }
+
+    this.drawAnimationFrame(anim, frame, false);
+    return true;
   }
 
   private drawSoftShadow(pet: PetModel): void {
