@@ -1,5 +1,6 @@
-import { emitTo } from "@tauri-apps/api/event";
+import { emitTo, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { MOOD_STORAGE_KEY, readStoredMood } from "./mood";
 
 interface PetMenuItem {
   id: string;
@@ -8,23 +9,38 @@ interface PetMenuItem {
 }
 
 const PET_MENU_ITEMS: PetMenuItem[] = [
-  { id: "feed", label: "喂食", icon: "🐟" },
-  { id: "sleep", label: "睡觉", icon: "💤" },
-  { id: "recall", label: "召回", icon: "🏠" },
+  { id: "feed", label: "投喂", icon: "🐟" },
+  { id: "sleep", label: "哄睡", icon: "💤" },
   { id: "chat", label: "聊天", icon: "💬" },
-  { id: "play", label: "看我", icon: "👋" },
-  { id: "__separator__", label: "", icon: "" },
-  { id: "settings", label: "设置", icon: "⚙️" },
-  { id: "quit", label: "退出", icon: "🚪" }
+  { id: "play", label: "看我", icon: "👋" }
 ];
 
 export class PetContextMenuView {
+  private titleEl: HTMLDivElement | null = null;
+  private petName: string;
+
+  constructor() {
+    const params = new URLSearchParams(window.location.search);
+    this.petName = params.get("petName")?.trim() || "Momo";
+  }
+
   mount(target: HTMLElement): void {
     document.body.classList.add("pet-menu-window");
     target.replaceChildren(this.buildMenu());
     window.addEventListener("contextmenu", (event) => event.preventDefault());
     window.addEventListener("keydown", this.onKeyDown);
     window.addEventListener("blur", this.hideWindow);
+    window.addEventListener("storage", this.onStorageUpdated);
+    window.addEventListener("focus", this.onFocus);
+    if ("__TAURI_INTERNALS__" in window) {
+      void listen<{ petName?: string }>("pet-menu-refresh", (event) => {
+        const nextName = event.payload?.petName?.trim();
+        if (nextName) {
+          this.petName = nextName;
+        }
+        this.updateTitle();
+      });
+    }
   }
 
   private buildMenu(): HTMLElement {
@@ -34,7 +50,8 @@ export class PetContextMenuView {
 
     const title = document.createElement("div");
     title.className = "pet-context-menu__title";
-    title.textContent = "Momo 的小菜单";
+    this.titleEl = title;
+    this.updateTitle();
     menu.appendChild(title);
 
     for (const item of PET_MENU_ITEMS) {
@@ -79,4 +96,23 @@ export class PetContextMenuView {
 
     await getCurrentWindow().hide();
   };
+
+  private onStorageUpdated = (event: StorageEvent): void => {
+    if (event.key === MOOD_STORAGE_KEY) {
+      this.updateTitle();
+    }
+  };
+
+  private onFocus = (): void => {
+    this.updateTitle();
+  };
+
+  private updateTitle(): void {
+    if (!this.titleEl) {
+      return;
+    }
+
+    const mood = readStoredMood();
+    this.titleEl.textContent = `${this.petName} · ${mood.label} ${mood.mood}`;
+  }
 }

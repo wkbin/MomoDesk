@@ -5,6 +5,7 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { ChatResponse, ChatMessage } from "../types/chat";
 import type { Settings } from "../types/pet";
 import { DEFAULT_SETTINGS } from "../config/settings";
+import { recordPetEvent } from "./petEvents";
 
 const TAURI_AVAILABLE = "__TAURI_INTERNALS__" in window;
 /** Max conversation turns to retain for context (backend uses last 6) */
@@ -12,11 +13,14 @@ const MAX_RECENT_MESSAGES = 6;
 const CHAT_WINDOW_WIDTH = 218;
 const CHAT_INPUT_HEIGHT = 64;
 const CHAT_REPLY_HEIGHT = 128;
+const CHAT_MEMORY_HEIGHT = 156;
 const CHAT_WINDOW_GAP = 14;
 
 export class MomoChatOverlay {
   private readonly root: HTMLElement;
   private readonly replyBubble: HTMLElement;
+  private readonly replyTextEl: HTMLElement;
+  private memoryPanelEl: HTMLElement | null = null;
   private readonly shell: HTMLElement;
   private readonly formEl: HTMLFormElement;
   private readonly inputEl: HTMLInputElement;
@@ -40,6 +44,9 @@ export class MomoChatOverlay {
     this.replyBubble = document.createElement("div");
     this.replyBubble.className = "momo-chat-reply";
     this.replyBubble.setAttribute("aria-live", "polite");
+    this.replyTextEl = document.createElement("div");
+    this.replyTextEl.className = "momo-chat-reply__text";
+    this.replyBubble.appendChild(this.replyTextEl);
     this.root.appendChild(this.replyBubble);
 
     this.shell = document.createElement("div");
@@ -155,6 +162,7 @@ export class MomoChatOverlay {
     this.pending = true;
     this.inputEl.value = "";
     this.inputEl.placeholder = "...";
+    recordPetEvent({ type: "chat_message" });
     this.syncBusyState();
     await this.showPendingReply();
 
@@ -173,6 +181,7 @@ export class MomoChatOverlay {
         this.recentMessages = this.recentMessages.slice(-MAX_RECENT_MESSAGES * 2);
       }
       await this.showReply(response.reply);
+      void this.maybeSuggestMemory(message, response.reply);
     } catch (error) {
       console.warn("Failed to chat with Momo", error);
       this.pending = false;
@@ -203,8 +212,9 @@ export class MomoChatOverlay {
   private async showReply(text: string): Promise<void> {
     window.clearTimeout(this.replyDismissTimer);
     this.enterReplyMode();
+    this.clearMemoryCandidate();
     this.replyBubble.classList.remove("momo-chat-reply--pending");
-    this.replyBubble.textContent = text;
+    this.replyTextEl.textContent = text;
     this.replyBubble.classList.add("momo-chat-reply--visible");
     if (this.isStandaloneWindow) {
       await this.showStandaloneWindow(false);
@@ -223,6 +233,7 @@ export class MomoChatOverlay {
     window.clearTimeout(this.replyDismissTimer);
     this.replyBubble.classList.remove("momo-chat-reply--visible");
     this.replyBubble.classList.remove("momo-chat-reply--pending");
+    this.clearMemoryCandidate();
   }
 
   private focusInputSoon(): void {
@@ -266,6 +277,13 @@ export class MomoChatOverlay {
       this.enterInputMode();
       void this.showStandaloneWindow(true);
     });
+    void listen<{ message: string }>("chat-show-proactive", (event) => {
+      const message = event.payload?.message?.trim();
+      if (!message) {
+        return;
+      }
+      void this.showReply(message);
+    });
   }
 
   private enterInputMode(): void {
@@ -281,7 +299,9 @@ export class MomoChatOverlay {
 
   private async showStandaloneWindow(focusInput: boolean): Promise<void> {
     const window = getCurrentWindow();
-    const height = this.shell.style.display === "none" ? CHAT_REPLY_HEIGHT : CHAT_INPUT_HEIGHT;
+    const height = this.shell.style.display === "none"
+      ? (this.memoryPanelEl ? CHAT_MEMORY_HEIGHT : CHAT_REPLY_HEIGHT)
+      : CHAT_INPUT_HEIGHT;
     const position = await this.getDesktopChatBubblePosition();
 
     await window.setSize(new LogicalSize(CHAT_WINDOW_WIDTH, height));
@@ -294,12 +314,141 @@ export class MomoChatOverlay {
 
   private async showPendingReply(): Promise<void> {
     this.enterReplyMode();
-    this.replyBubble.textContent = "唔，让我想想…";
+    this.clearMemoryCandidate();
+    this.replyTextEl.textContent = "唔，让我想想…";
     this.replyBubble.classList.add("momo-chat-reply--pending");
     this.replyBubble.classList.add("momo-chat-reply--visible");
     if (this.isStandaloneWindow) {
       await this.showStandaloneWindow(false);
     }
+  }
+
+  private async maybeSuggestMemory(userMessage: string, assistantReply: string): Promise<void> {
+    if (!TAURI_AVAILABLE || !this.settings.memoryEnabled || !userMessage.trim()) {
+      return;
+    }
+
+    try {
+      const response = await invoke<{ memory: string | null }>("suggest_memory", {
+        message: userMessage,
+        assistantReply,
+        settings: this.settings
+      });
+      const memory = response.memory?.trim();
+      if (!memory || this.hasExistingMemory(memory)) {
+        return;
+      }
+      await this.showMemoryCandidate(memory);
+    } catch (error) {
+      console.warn("Failed to suggest memory", error);
+    }
+  }
+
+  private async showMemoryCandidate(memory: string): Promise<void> {
+    window.clearTimeout(this.replyDismissTimer);
+    this.enterReplyMode();
+    this.clearMemoryCandidate();
+    this.replyBubble.classList.remove("momo-chat-reply--pending");
+    this.replyBubble.classList.add("momo-chat-reply--memory");
+    this.replyBubble.classList.add("momo-chat-reply--visible");
+
+    const panel = document.createElement("div");
+    panel.className = "momo-chat-memory";
+
+    const label = document.createElement("span");
+    label.className = "momo-chat-memory__text";
+    label.textContent = `记住：${memory}`;
+    panel.appendChild(label);
+
+    const actions = document.createElement("div");
+    actions.className = "momo-chat-memory__actions";
+
+    const acceptButton = document.createElement("button");
+    acceptButton.type = "button";
+    acceptButton.className = "momo-chat-memory__button momo-chat-memory__button--primary";
+    acceptButton.textContent = "记住";
+    acceptButton.addEventListener("click", () => {
+      void this.acceptMemoryCandidate(memory);
+    });
+    actions.appendChild(acceptButton);
+
+    const dismissButton = document.createElement("button");
+    dismissButton.type = "button";
+    dismissButton.className = "momo-chat-memory__button";
+    dismissButton.textContent = "忽略";
+    dismissButton.addEventListener("click", () => {
+      this.clearMemoryCandidate();
+      this.scheduleReplyDismiss(3000);
+    });
+    actions.appendChild(dismissButton);
+
+    panel.appendChild(actions);
+    this.replyBubble.appendChild(panel);
+    this.memoryPanelEl = panel;
+
+    if (this.isStandaloneWindow) {
+      await this.showStandaloneWindow(false);
+    }
+    this.scheduleReplyDismiss(14000);
+  }
+
+  private async acceptMemoryCandidate(memory: string): Promise<void> {
+    const nextMemoryNotes = this.appendMemoryNote(memory);
+    const nextSettings: Settings = {
+      ...this.settings,
+      memoryEnabled: true,
+      memoryNotes: nextMemoryNotes
+    };
+
+    try {
+      await invoke("save_settings", { settings: nextSettings });
+      this.settings = nextSettings;
+      this.clearMemoryCandidate();
+      this.replyTextEl.textContent = "好，我记住啦。";
+      this.scheduleReplyDismiss(3500);
+    } catch (error) {
+      console.warn("Failed to save memory", error);
+      this.replyTextEl.textContent = "这条记忆没存上，稍后再试。";
+      this.scheduleReplyDismiss(4500);
+    }
+
+    if (this.isStandaloneWindow) {
+      await this.showStandaloneWindow(false);
+    }
+  }
+
+  private clearMemoryCandidate(): void {
+    this.memoryPanelEl?.remove();
+    this.memoryPanelEl = null;
+    this.replyBubble.classList.remove("momo-chat-reply--memory");
+  }
+
+  private scheduleReplyDismiss(delayMs: number): void {
+    window.clearTimeout(this.replyDismissTimer);
+    this.replyDismissTimer = window.setTimeout(() => {
+      if (this.isStandaloneWindow) {
+        this.onClose?.();
+      } else {
+        this.replyBubble.classList.remove("momo-chat-reply--visible");
+        this.clearMemoryCandidate();
+      }
+    }, delayMs);
+  }
+
+  private appendMemoryNote(memory: string): string {
+    const existing = this.settings.memoryNotes.trim();
+    if (!existing) {
+      return `- ${memory}`;
+    }
+
+    return `${existing}\n- ${memory}`;
+  }
+
+  private hasExistingMemory(memory: string): boolean {
+    const normalized = memory.replace(/\s+/g, "");
+    return this.settings.memoryNotes
+      .split("\n")
+      .some((line) => line.replace(/^-\s*/, "").replace(/\s+/g, "") === normalized);
   }
 
   private async getDesktopChatBubblePosition(): Promise<{ x: number; y: number }> {

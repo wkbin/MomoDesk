@@ -28,8 +28,14 @@ export interface Settings {
   apiBaseUrl: string;
   apiKey: string;
   model: string;
+  petName: string;
   personaPreset: "tsundere" | "clingy" | "cool";
+  memoryEnabled: boolean;
+  memoryNotes: string;
   customSystemPrompt: string;
+  aiMoodCalibrationEnabled: boolean;
+  proactiveBubbleEnabled: boolean;
+  aiProactiveBubbleEnabled: boolean;
 }
 
 export interface PetPersistState {

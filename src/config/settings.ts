@@ -11,8 +11,14 @@ export const DEFAULT_SETTINGS: Settings = {
   apiBaseUrl: "https://api.deepseek.com/v1",
   apiKey: "",
   model: "deepseek-chat",
+  petName: "Momo",
   personaPreset: "tsundere",
-  customSystemPrompt: ""
+  memoryEnabled: true,
+  memoryNotes: "",
+  customSystemPrompt: "",
+  aiMoodCalibrationEnabled: false,
+  proactiveBubbleEnabled: true,
+  aiProactiveBubbleEnabled: false
 };
 
 export const LLM_PROVIDER_OPTIONS: Array<{

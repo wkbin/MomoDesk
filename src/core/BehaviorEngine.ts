@@ -14,16 +14,23 @@ const GROOM_DURATION_MS = 5100;
 const EAT_DURATION_MS = 10050;
 const MIN_SLEEP_DURATION_MS = 45000;
 
-// Mood constants
 const MOOD_MAX = 100;
 const MOOD_MIN = 0;
-const MOOD_FEED = 20;
-const MOOD_NUDGE = 5;
-const MOOD_DRAG = -5;
 const IDLE_DECAY_PER_SEC = -0.02;
 const SLEEP_REGEN_PER_SEC = 0.08;
+const NUDGE_BURST_WINDOW_MS = 4200;
+const FEED_REPEAT_WINDOW_MS = 90000;
+const DRAG_REPEAT_WINDOW_MS = 45000;
 
 export class BehaviorEngine {
+  private lastNudgeAtMs = 0;
+  private nudgeBurstCount = 0;
+  private lastFeedAtMs = 0;
+  private feedRepeatCount = 0;
+  private dragStartedAtMs = 0;
+  private recentDragCount = 0;
+  private lastDragAtMs = 0;
+
   constructor(private bounds: Bounds) {}
 
   setBounds(bounds: Bounds): void {
@@ -79,7 +86,7 @@ export class BehaviorEngine {
   }
 
   beginDrag(pet: PetModel): void {
-    this.adjustMood(pet, MOOD_DRAG);
+    this.dragStartedAtMs = Date.now();
     this.setState(pet, "drag");
   }
 
@@ -91,25 +98,31 @@ export class BehaviorEngine {
   }
 
   releaseDrag(pet: PetModel): void {
-    pet.velocity = { x: 0, y: 180 };
+    this.adjustMood(pet, this.getDragMoodDelta());
     this.setState(pet, "fall");
+    pet.velocity = { x: 0, y: 180 };
   }
 
   nudgeInteraction(pet: PetModel): void {
-    // When very unhappy, sometimes ignore the nudge entirely
-    if (pet.mood < 15 && Math.random() < 0.4) {
+    const reaction = this.getNudgeReaction(pet);
+    if (reaction.ignored) {
+      this.adjustMood(pet, reaction.delta);
       this.deferNextDecision(pet);
       return;
     }
 
-    this.adjustMood(pet, MOOD_NUDGE);
+    this.adjustMood(pet, reaction.delta);
     const next = this.canStretchFrom(pet.state) && Math.random() > 0.5 ? "stretch" : "groom";
     this.setState(pet, next);
   }
 
   feed(pet: PetModel): void {
-    this.adjustMood(pet, MOOD_FEED);
+    this.adjustMood(pet, this.getFeedMoodDelta(pet));
     this.setState(pet, "eat");
+  }
+
+  applyExternalMoodAdjustment(pet: PetModel, delta: number): void {
+    this.adjustMood(pet, this.clamp(delta, -8, 8));
   }
 
   sleep(pet: PetModel): void {
@@ -254,7 +267,7 @@ export class BehaviorEngine {
     }
 
     if (pet.state === "sleep_to_idle") {
-      return pet.stateElapsedMs > 2500;
+      return pet.stateElapsedMs > 5100;
     }
 
     return false;
@@ -290,6 +303,63 @@ export class BehaviorEngine {
 
   private randomBetween(min: number, max: number): number {
     return min + Math.random() * (max - min);
+  }
+
+  private getNudgeReaction(pet: PetModel): { delta: number; ignored: boolean } {
+    const now = Date.now();
+    const repeated = now - this.lastNudgeAtMs < NUDGE_BURST_WINDOW_MS;
+    this.nudgeBurstCount = repeated ? this.nudgeBurstCount + 1 : 1;
+    this.lastNudgeAtMs = now;
+
+    if (pet.mood < 15 && Math.random() < 0.4) {
+      return { delta: this.randomBetween(-0.8, 0.4), ignored: true };
+    }
+
+    if (pet.state === "sleep") {
+      return {
+        delta: this.randomBetween(-3.5, -1.2) - Math.max(0, this.nudgeBurstCount - 1) * 0.8,
+        ignored: Math.random() < 0.35
+      };
+    }
+
+    const burstPenalty = Math.max(0, this.nudgeBurstCount - 2) * 1.8;
+    const calmBonus = pet.state === "sit" || pet.state === "idle" ? 1 : 0;
+    const moodSaturation = pet.mood > 80 ? 1.2 : 0;
+    const delta = this.randomBetween(1.2, 4.4) + calmBonus - burstPenalty - moodSaturation;
+    return { delta, ignored: false };
+  }
+
+  private getFeedMoodDelta(pet: PetModel): number {
+    const now = Date.now();
+    const repeated = now - this.lastFeedAtMs < FEED_REPEAT_WINDOW_MS;
+    this.feedRepeatCount = repeated ? this.feedRepeatCount + 1 : 1;
+    this.lastFeedAtMs = now;
+
+    if (pet.state === "sleep") {
+      return this.randomBetween(0.5, 4);
+    }
+
+    const repeatPenalty = Math.max(0, this.feedRepeatCount - 1) * 6;
+    const lowMoodBonus = pet.mood < 35 ? 3 : 0;
+    const highMoodPenalty = pet.mood > 82 ? 4 : 0;
+    return this.randomBetween(10, 18) + lowMoodBonus - highMoodPenalty - repeatPenalty;
+  }
+
+  private getDragMoodDelta(): number {
+    const now = Date.now();
+    const durationMs = this.dragStartedAtMs > 0 ? now - this.dragStartedAtMs : 0;
+    const repeated = now - this.lastDragAtMs < DRAG_REPEAT_WINDOW_MS;
+    this.recentDragCount = repeated ? this.recentDragCount + 1 : 1;
+    this.lastDragAtMs = now;
+    this.dragStartedAtMs = 0;
+
+    const durationPenalty = durationMs < 700
+      ? this.randomBetween(-1.2, -0.2)
+      : durationMs < 2500
+        ? this.randomBetween(-3.5, -1.4)
+        : this.randomBetween(-6.5, -3.2);
+    const repeatPenalty = Math.max(0, this.recentDragCount - 1) * -1.3;
+    return durationPenalty + repeatPenalty;
   }
 
   private adjustMood(pet: PetModel, delta: number): void {

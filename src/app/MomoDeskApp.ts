@@ -18,6 +18,9 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { PetModel, PetPersistState, PetState, Settings } from "../types/pet";
 import type { AnimationKey, PetPackageManifest } from "../types/pet-package";
 import { DEFAULT_SETTINGS } from "../config/settings";
+import { MOOD_STORAGE_KEY, MOOD_UPDATED_EVENT, describeMood } from "../ui/mood";
+import { recordPetEvent, readPetEvents } from "../ui/petEvents";
+import type { PetEvent } from "../ui/petEvents";
 
 const INITIAL_SIZE = 220;
 const SAVE_INTERVAL_MS = 5000;
@@ -43,6 +46,12 @@ const AUTO_LOOK_MAX_DELAY_MS = 42000;
 const AUTO_LOOK_MIN_DURATION_MS = 2200;
 const AUTO_LOOK_MAX_DURATION_MS = 4800;
 const MANUAL_LOOK_DURATION_MS = 8000;
+const AI_MOOD_MIN_INTERVAL_MS = 180000;
+const AI_MOOD_LOOKBACK_MS = 600000;
+const AI_MOOD_MIN_EVENTS = 4;
+const PROACTIVE_BUBBLE_MIN_INTERVAL_MS = 600000;
+const PROACTIVE_BUBBLE_MIN_SESSION_MS = 90000;
+const PROACTIVE_BUBBLE_CHANCE = 0.003;
 const TAURI_AVAILABLE = "__TAURI_INTERNALS__" in window;
 const DEFAULT_STATIC_IMAGE_URL = new URL(
   "../../assets/pets/default/preview/cat_static.png",
@@ -135,6 +144,14 @@ export class MomoDeskApp {
   private desktopMouseUpdateInFlight = false;
   private lookAtMouseUntilMs = 0;
   private nextAutoLookAtMouseMs = performance.now() + 12000;
+  private lastPublishedMood = -1;
+  private lastPublishedState: PetState | null = null;
+  private lastAiMoodEvaluationAtMs = 0;
+  private aiMoodEvaluationInFlight = false;
+  private startedAtMs = performance.now();
+  private lastProactiveBubbleAtMs = 0;
+  private proactiveBubbleInFlight = false;
+  private lastProactiveTrigger = "";
   private readonly LOOK_RADIUS = 130;
   private readonly LOOK_INNER_DEAD_ZONE = 28;
 
@@ -164,6 +181,9 @@ export class MomoDeskApp {
       onDesktopDragStart: TAURI_AVAILABLE ? this.beginDesktopDrag : undefined,
       onDesktopDragMove: TAURI_AVAILABLE ? this.updateDesktopDrag : undefined,
       onDesktopDragEnd: TAURI_AVAILABLE ? this.endDesktopDrag : undefined,
+      onDragStart: () => this.recordInteractionEvent("drag_start"),
+      onDragEnd: () => this.recordInteractionEvent("drag_end"),
+      onNudge: () => this.recordInteractionEvent("nudge"),
       windowDragHitRadius: TAURI_AVAILABLE ? 96 : undefined
     });
   }
@@ -173,11 +193,12 @@ export class MomoDeskApp {
     this.petPackage = await this.packageLoader.loadDefault();
     await this.applyPetPackage();
     await this.restoreDesktopState();
+    this.publishMoodStatus(true);
 
     this.initContextMenu();
     this.attachMenuWindowEvents();
 
-    window.addEventListener("resize", () => this.resize());
+    window.addEventListener("resize", this.onResize);
     window.addEventListener("keydown", this.onPreviewKeyDown);
     this.canvas.addEventListener("contextmenu", this.onContextMenu);
     this.canvas.addEventListener("pointermove", this.onPointerMove);
@@ -204,6 +225,7 @@ export class MomoDeskApp {
   stop(): void {
     window.cancelAnimationFrame(this.rafId);
     window.clearInterval(this.saveTimerId);
+    window.removeEventListener("resize", this.onResize);
     window.removeEventListener("keydown", this.onPreviewKeyDown);
     this.canvas.removeEventListener("contextmenu", this.onContextMenu);
     this.canvas.removeEventListener("pointermove", this.onPointerMove);
@@ -409,19 +431,12 @@ export class MomoDeskApp {
         y: INITIAL_SIZE * 0.74
       });
       this.behavior.setState(this.pet, "idle");
+      this.recordInteractionEvent("recall");
       void this.savePetState();
     });
 
-    void window.listen("tray-feed", () => {
-      this.cancelDesktopMotion();
-      this.behavior.feed(this.pet);
-      void this.savePetState();
-    });
-
-    void window.listen("tray-sleep", () => {
-      this.cancelDesktopMotion();
-      this.behavior.sleep(this.pet);
-      void this.savePetState();
+    void window.listen("tray-settings", () => {
+      void this.openSettingsWindow();
     });
 
     void window.listen("tray-quit", () => {
@@ -473,6 +488,9 @@ export class MomoDeskApp {
     void this.updateLookAtMouse();
     this.renderer.render(this.pet, now);
     this.saveOnStateChange();
+    this.publishMoodStatus();
+    void this.maybeEvaluateMoodWithAi();
+    void this.maybeShowProactiveBubble(now);
     this.updateClickThrough(now);
 
     this.rafId = window.requestAnimationFrame(this.loop);
@@ -598,9 +616,20 @@ export class MomoDeskApp {
       return;
     }
 
+    const previousState = this.lastSavedState;
     this.lastSavedState = this.pet.state;
+    recordPetEvent({
+      type: "state_change",
+      fromState: previousState,
+      toState: this.pet.state,
+      mood: Math.round(this.pet.mood)
+    });
     void this.savePetState();
   }
+
+  private readonly onResize = (): void => {
+    this.resize();
+  };
 
   private onPointerPersist = (): void => {
     void this.savePetState();
@@ -631,7 +660,8 @@ export class MomoDeskApp {
     const items = this.getContextMenuItems();
     this.contextMenuItems = items;
     this.contextMenu = new ContextMenu({
-      items
+      items,
+      title: this.getMoodMenuTitle()
     });
   }
 
@@ -639,35 +669,23 @@ export class MomoDeskApp {
     return [
       {
         id: "feed",
-        label: "喂食",
+        label: "投喂",
         icon: "🐟",
         action: () => {
           this.cancelDesktopMotion();
           this.behavior.feed(this.pet);
+          this.recordInteractionEvent("feed");
           void this.savePetState();
         }
       },
       {
         id: "sleep",
-        label: "睡觉",
+        label: "哄睡",
         icon: "💤",
         action: () => {
           this.cancelDesktopMotion();
           this.behavior.sleep(this.pet);
-          void this.savePetState();
-        }
-      },
-      {
-        id: "recall",
-        label: "召回",
-        icon: "🏠",
-        action: () => {
-          this.cancelDesktopMotion();
-          this.behavior.restorePosition(this.pet, {
-            x: INITIAL_SIZE / 2,
-            y: INITIAL_SIZE * 0.74
-          });
-          this.behavior.setState(this.pet, "idle");
+          this.recordInteractionEvent("sleep");
           void this.savePetState();
         }
       },
@@ -687,25 +705,8 @@ export class MomoDeskApp {
         icon: "👋",
         action: () => {
           this.startLookAtMouse(performance.now(), MANUAL_LOOK_DURATION_MS);
+          this.recordInteractionEvent("look");
           void this.savePetState();
-        }
-      },
-      { id: "__separator__", label: "", icon: "", action: () => {} },
-      {
-        id: "settings",
-        label: "设置",
-        icon: "⚙️",
-        action: () => {
-          void this.openSettingsWindow();
-        }
-      },
-      {
-        id: "quit",
-        label: "退出",
-        icon: "🚪",
-        action: () => {
-          this.stop();
-          window.close();
         }
       }
     ];
@@ -751,8 +752,243 @@ export class MomoDeskApp {
       return;
     }
 
+    this.contextMenu?.setTitle(this.getMoodMenuTitle());
     this.contextMenu?.open(event.clientX, event.clientY);
   };
+
+  private getMoodMenuTitle(): string {
+    const mood = describeMood(this.pet.mood, this.pet.state);
+    return `${this.getPetName()} · ${mood.label} ${mood.mood}`;
+  }
+
+  private getPetName(): string {
+    return this.settings.petName?.trim() || DEFAULT_SETTINGS.petName;
+  }
+
+  private publishMoodStatus(force = false): void {
+    const snapshot = describeMood(this.pet.mood, this.pet.state);
+    if (!force && snapshot.mood === this.lastPublishedMood && snapshot.state === this.lastPublishedState) {
+      return;
+    }
+
+    const previousMood = this.lastPublishedMood;
+    this.lastPublishedMood = snapshot.mood;
+    this.lastPublishedState = this.pet.state;
+    try {
+      window.localStorage.setItem(MOOD_STORAGE_KEY, JSON.stringify(snapshot));
+      window.dispatchEvent(new CustomEvent(MOOD_UPDATED_EVENT, { detail: snapshot }));
+      if (previousMood >= 0 && previousMood !== snapshot.mood) {
+        recordPetEvent({
+          type: "mood_change",
+          previousMood,
+          mood: snapshot.mood,
+          state: this.pet.state
+        });
+      }
+    } catch {
+      // localStorage can fail in restricted preview contexts; behavior still works.
+    }
+  }
+
+  private recordInteractionEvent(type: Parameters<typeof recordPetEvent>[0]["type"]): void {
+    recordPetEvent({
+      type,
+      state: this.pet.state,
+      mood: Math.round(this.pet.mood)
+    });
+  }
+
+  private async maybeEvaluateMoodWithAi(): Promise<void> {
+    if (!TAURI_AVAILABLE || !this.settings.aiMoodCalibrationEnabled || this.aiMoodEvaluationInFlight) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - this.lastAiMoodEvaluationAtMs < AI_MOOD_MIN_INTERVAL_MS) {
+      return;
+    }
+
+    const events = readPetEvents();
+    const recentEvents = events.filter((event) => {
+      const timestamp = Date.parse(event.timestamp);
+      return Number.isFinite(timestamp)
+        && timestamp > this.lastAiMoodEvaluationAtMs
+        && now - timestamp <= AI_MOOD_LOOKBACK_MS
+        && event.type !== "mood_change"
+        && event.type !== "ai_mood_adjustment";
+    }).slice(-18);
+    const meaningfulEvents = recentEvents.filter((event) =>
+      event.type === "nudge"
+      || event.type === "feed"
+      || event.type === "drag_start"
+      || event.type === "drag_end"
+      || event.type === "chat_message"
+      || event.type === "sleep"
+    );
+
+    if (meaningfulEvents.length < AI_MOOD_MIN_EVENTS) {
+      return;
+    }
+
+    this.aiMoodEvaluationInFlight = true;
+    try {
+      const response = await invoke<{ delta: number; reason: string }>("evaluate_pet_mood", {
+        request: {
+          currentMood: Math.round(this.pet.mood),
+          currentState: this.pet.state,
+          events: recentEvents.map((event) => this.toMoodEvaluationEvent(event)),
+          settings: this.settings
+        }
+      });
+      const delta = Math.max(-6, Math.min(6, Number(response.delta) || 0));
+      if (Math.abs(delta) >= 0.25) {
+        const previousMood = Math.round(this.pet.mood);
+        this.behavior.applyExternalMoodAdjustment(this.pet, delta);
+        const mood = Math.round(this.pet.mood);
+        recordPetEvent({
+          type: "ai_mood_adjustment",
+          previousMood,
+          mood,
+          delta,
+          reason: response.reason || "AI 校准",
+          state: this.pet.state
+        });
+        this.publishMoodStatus(true);
+      }
+      this.lastAiMoodEvaluationAtMs = now;
+    } catch (error) {
+      console.warn("AI mood evaluation failed", error);
+      this.lastAiMoodEvaluationAtMs = now;
+    } finally {
+      this.aiMoodEvaluationInFlight = false;
+    }
+  }
+
+  private toMoodEvaluationEvent(event: PetEvent): Record<string, unknown> {
+    return {
+      eventType: event.type,
+      timestamp: event.timestamp,
+      state: event.state,
+      fromState: event.fromState,
+      toState: event.toState,
+      mood: event.mood,
+      previousMood: event.previousMood
+    };
+  }
+
+  private async maybeShowProactiveBubble(now: number): Promise<void> {
+    if (
+      !TAURI_AVAILABLE
+      || !this.settings.proactiveBubbleEnabled
+      || this.proactiveBubbleInFlight
+      || now - this.startedAtMs < PROACTIVE_BUBBLE_MIN_SESSION_MS
+      || now - this.lastProactiveBubbleAtMs < PROACTIVE_BUBBLE_MIN_INTERVAL_MS
+      || Math.random() > PROACTIVE_BUBBLE_CHANCE
+    ) {
+      return;
+    }
+
+    const trigger = this.getProactiveTrigger();
+    if (!trigger || trigger === this.lastProactiveTrigger) {
+      return;
+    }
+
+    this.proactiveBubbleInFlight = true;
+    try {
+      const message = await this.generateProactiveMessage(trigger);
+      if (!message) {
+        return;
+      }
+
+      await this.showProactiveChatBubble(message);
+      this.lastProactiveBubbleAtMs = now;
+      this.lastProactiveTrigger = trigger;
+      recordPetEvent({
+        type: "proactive_bubble",
+        state: this.pet.state,
+        mood: Math.round(this.pet.mood),
+        reason: trigger,
+        message
+      });
+    } catch (error) {
+      console.warn("Failed to show proactive bubble", error);
+      this.lastProactiveBubbleAtMs = now;
+    } finally {
+      this.proactiveBubbleInFlight = false;
+    }
+  }
+
+  private getProactiveTrigger(): string | null {
+    if (this.pet.state === "sit" && this.pet.stateElapsedMs > 120000) {
+      return "坐久了，提醒用户休息";
+    }
+
+    if ((this.pet.state === "idle" || this.pet.state === "sit") && this.pet.mood < 28) {
+      return "心情低，想要一点陪伴";
+    }
+
+    if (this.pet.state === "idle" && this.pet.stateElapsedMs > 180000) {
+      return "空闲很久，想轻轻搭话";
+    }
+
+    if (this.pet.state === "idle" && this.pet.mood > 78) {
+      return "心情很好，想分享小事";
+    }
+
+    if (this.pet.state === "idle" && this.pet.mood < 48) {
+      return "有点饿，想要小鱼干";
+    }
+
+    return null;
+  }
+
+  private async generateProactiveMessage(trigger: string): Promise<string> {
+    if (this.settings.aiProactiveBubbleEnabled) {
+      try {
+        const response = await invoke<{ message: string }>("generate_proactive_message", {
+          request: {
+            currentMood: Math.round(this.pet.mood),
+            currentState: this.pet.state,
+            trigger,
+            settings: this.settings
+          }
+        });
+        const message = this.sanitizeBubbleMessage(response.message);
+        if (message) {
+          return message;
+        }
+      } catch (error) {
+        console.warn("AI proactive message failed; using local fallback", error);
+      }
+    }
+
+    return this.getLocalProactiveMessage(trigger);
+  }
+
+  private getLocalProactiveMessage(trigger: string): string {
+    const messagesByTrigger: Array<[string, string[]]> = [
+      ["坐久了", ["坐好久啦，要不要伸个懒腰？", "陪你坐着呢，也记得歇一小会。"]],
+      ["心情低", ["今天可以摸摸我吗？", "我有点安静，但还在陪你。"]],
+      ["空闲很久", ["刚刚有什么好玩的事吗？", "我在这儿，偷偷陪你一会。"]],
+      ["心情很好", ["我今天心情不错，想贴贴。", "刚才像捡到一小块太阳。"]],
+      ["有点饿", ["有小鱼干吗？一点点也行。", "肚子好像在小声叫我。"]]
+    ];
+    const matched = messagesByTrigger.find(([key]) => trigger.includes(key))?.[1]
+      ?? ["我在旁边陪你。"];
+    return matched[Math.floor(Math.random() * matched.length)];
+  }
+
+  private sanitizeBubbleMessage(message: string): string {
+    return message.replace(/\s+/g, " ").trim().slice(0, 32);
+  }
+
+  private async showProactiveChatBubble(message: string): Promise<void> {
+    const chatWindow = await this.getOrCreateChatBubbleWindow();
+    const position = await this.getDesktopChatBubblePosition();
+    await chatWindow.setPosition(new PhysicalPosition(position.x, position.y));
+    await chatWindow.show();
+    await emitTo("chat-bubble", "chat-show-proactive", { message });
+  }
 
   private async openDesktopContextMenu(fallbackX: number, fallbackY: number): Promise<void> {
     if (this.menuWindowOpening) {
@@ -762,6 +998,7 @@ export class MomoDeskApp {
     this.menuWindowOpening = true;
     try {
       const menuWindow = await this.getOrCreateMenuWindow();
+      await emitTo("pet-menu", "pet-menu-refresh", { petName: this.getPetName() });
       const position = await this.getDesktopMenuPosition();
       await menuWindow.setPosition(new PhysicalPosition(position.x, position.y));
       await menuWindow.show();
@@ -783,7 +1020,7 @@ export class MomoDeskApp {
 
     const menuWindow = new WebviewWindow("pet-menu", {
       url: this.getMenuWindowUrl(),
-      title: "Momo 的小菜单",
+      title: `${this.getPetName()} 的小菜单`,
       width: PET_MENU_WINDOW_WIDTH,
       height: PET_MENU_WINDOW_HEIGHT,
       visible: false,
@@ -798,22 +1035,26 @@ export class MomoDeskApp {
       focus: false,
       shadow: false
     });
-    this.menuWindow = menuWindow;
-
-    await Promise.race([
-      new Promise<void>((resolve, reject) => {
-        void menuWindow.once("tauri://created", () => resolve());
-        void menuWindow.once("tauri://error", (event) => reject(event.payload));
-      }),
-      new Promise<void>((resolve) => window.setTimeout(resolve, 600))
-    ]);
+    try {
+      await Promise.race([
+        new Promise<void>((resolve, reject) => {
+          void menuWindow.once("tauri://created", () => resolve());
+          void menuWindow.once("tauri://error", (event) => reject(event.payload));
+        }),
+        new Promise<void>((resolve) => window.setTimeout(resolve, 600))
+      ]);
+      this.menuWindow = menuWindow;
+    } catch (error) {
+      this.menuWindow = null;
+      throw error;
+    }
 
     return menuWindow;
   }
 
   private getMenuWindowUrl(): string {
     const url = new URL(window.location.href);
-    url.search = "view=pet-menu";
+    url.search = `view=pet-menu&petName=${encodeURIComponent(this.getPetName())}`;
     url.hash = "";
     return url.href;
   }
@@ -837,7 +1078,7 @@ export class MomoDeskApp {
 
     const settingsWindow = new WebviewWindow("settings", {
       url: this.getSettingsWindowUrl(),
-      title: "Momo 设置",
+      title: `${this.getPetName()} 设置`,
       width: SETTINGS_WINDOW_WIDTH,
       height: SETTINGS_WINDOW_HEIGHT,
       visible: false,
@@ -852,15 +1093,19 @@ export class MomoDeskApp {
       focus: true,
       center: true
     });
-    this.settingsWindow = settingsWindow;
-
-    await Promise.race([
-      new Promise<void>((resolve, reject) => {
-        void settingsWindow.once("tauri://created", () => resolve());
-        void settingsWindow.once("tauri://error", (event) => reject(event.payload));
-      }),
-      new Promise<void>((resolve) => window.setTimeout(resolve, 600))
-    ]);
+    try {
+      await Promise.race([
+        new Promise<void>((resolve, reject) => {
+          void settingsWindow.once("tauri://created", () => resolve());
+          void settingsWindow.once("tauri://error", (event) => reject(event.payload));
+        }),
+        new Promise<void>((resolve) => window.setTimeout(resolve, 600))
+      ]);
+      this.settingsWindow = settingsWindow;
+    } catch (error) {
+      this.settingsWindow = null;
+      throw error;
+    }
 
     return settingsWindow;
   }
@@ -898,7 +1143,7 @@ export class MomoDeskApp {
 
     const chatWindow = new WebviewWindow("chat-bubble", {
       url: this.getChatBubbleWindowUrl(),
-      title: "Momo 聊天气泡",
+      title: `${this.getPetName()} 聊天气泡`,
       width: CHAT_WINDOW_WIDTH,
       height: CHAT_WINDOW_HEIGHT,
       visible: false,
@@ -913,8 +1158,6 @@ export class MomoDeskApp {
       focus: true,
       shadow: false
     });
-    this.chatWindow = chatWindow;
-
     try {
       await Promise.race([
         new Promise<void>((resolve, reject) => {
@@ -925,9 +1168,11 @@ export class MomoDeskApp {
           window.setTimeout(() => reject(new Error("Window creation timed out after 3s")), 3000)
         )
       ]);
+      this.chatWindow = chatWindow;
     } catch (err) {
+      this.chatWindow = null;
       console.warn("Chat bubble window ready wait failed", err);
-      // Still return the window — it may work anyway
+      throw err;
     }
 
     return chatWindow;

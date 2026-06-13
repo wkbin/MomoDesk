@@ -9,6 +9,7 @@ export interface ContextMenuItem {
 export interface ContextMenuOptions {
   items: ContextMenuItem[];
   onClose?: () => void;
+  title?: string;
 }
 
 /** Minimum margin from viewport edges */
@@ -17,6 +18,7 @@ const EDGE_MARGIN = 4;
 export class ContextMenu {
   private readonly element: HTMLDivElement;
   private readonly options: ContextMenuOptions;
+  private titleEl: HTMLDivElement | null = null;
   private isOpen = false;
   private readonly closeHandler: (event: PointerEvent) => void;
   private readonly blurHandler: () => void;
@@ -52,6 +54,13 @@ export class ContextMenu {
     container.style.display = "none";
     container.setAttribute("role", "menu");
 
+    if (this.options.title) {
+      this.titleEl = document.createElement("div");
+      this.titleEl.className = "pet-context-menu__title pet-context-menu__title--inline";
+      this.titleEl.textContent = this.options.title;
+      container.appendChild(this.titleEl);
+    }
+
     for (const item of this.options.items) {
       if (item.id === "__separator__") {
         const sep = document.createElement("div");
@@ -77,6 +86,16 @@ export class ContextMenu {
 
     document.body.appendChild(container);
     return container;
+  }
+
+  setTitle(title: string): void {
+    if (!this.titleEl) {
+      this.titleEl = document.createElement("div");
+      this.titleEl.className = "pet-context-menu__title pet-context-menu__title--inline";
+      this.element.prepend(this.titleEl);
+    }
+
+    this.titleEl.textContent = title;
   }
 
   open(x: number, y: number): void {

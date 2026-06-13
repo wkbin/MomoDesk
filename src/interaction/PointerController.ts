@@ -5,6 +5,9 @@ interface PointerControllerOptions {
   onDesktopDragStart?: (screenPoint: Vec2) => void;
   onDesktopDragMove?: (screenPoint: Vec2) => void;
   onDesktopDragEnd?: () => void;
+  onDragStart?: () => void;
+  onDragEnd?: () => void;
+  onNudge?: () => void;
   windowDragHitRadius?: number;
 }
 
@@ -27,14 +30,12 @@ export class PointerController {
     this.canvas.addEventListener("pointerdown", this.onPointerDown);
     window.addEventListener("pointermove", this.onPointerMove);
     window.addEventListener("pointerup", this.onPointerUp);
-    this.canvas.addEventListener("dblclick", this.onDoubleClick);
   }
 
   detach(): void {
     this.canvas.removeEventListener("pointerdown", this.onPointerDown);
     window.removeEventListener("pointermove", this.onPointerMove);
     window.removeEventListener("pointerup", this.onPointerUp);
-    this.canvas.removeEventListener("dblclick", this.onDoubleClick);
   }
 
   private onPointerDown = (event: PointerEvent): void => {
@@ -74,6 +75,7 @@ export class PointerController {
     if (!this.isDragging && movedEnough) {
       this.isDragging = true;
       this.behavior.beginDrag(this.pet);
+      this.options.onDragStart?.();
       this.options.onDesktopDragStart?.(this.getScreenPoint(event));
     }
 
@@ -101,18 +103,16 @@ export class PointerController {
     if (this.isDragging) {
       this.isDragging = false;
       this.options.onDesktopDragEnd?.();
+      this.options.onDragEnd?.();
       this.behavior.releaseDrag(this.pet);
     } else {
       this.behavior.nudgeInteraction(this.pet);
+      this.options.onNudge?.();
     }
 
     if (this.canvas.hasPointerCapture(event.pointerId)) {
       this.canvas.releasePointerCapture(event.pointerId);
     }
-  };
-
-  private onDoubleClick = (): void => {
-    this.behavior.nudgeInteraction(this.pet);
   };
 
   private getCanvasPoint(event: PointerEvent): Vec2 {
@@ -134,7 +134,7 @@ export class PointerController {
   }
 
   private hitTest(point: Vec2): boolean {
-    const ctx = this.canvas.getContext("2d", { willReadFrequently: true });
+    const ctx = this.canvas.getContext("2d");
     if (ctx) {
       const ratio = window.devicePixelRatio || 1;
       const x = Math.floor(point.x * ratio);
