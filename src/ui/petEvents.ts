@@ -12,7 +12,8 @@ export type PetEventType =
   | "mood_change"
   | "ai_mood_adjustment"
   | "proactive_bubble"
-  | "chat_message";
+  | "chat_message"
+  | "achievement_unlocked";
 
 export interface PetEvent {
   type: PetEventType;

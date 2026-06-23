@@ -22,6 +22,19 @@ const NUDGE_BURST_WINDOW_MS = 4200;
 const FEED_REPEAT_WINDOW_MS = 90000;
 const DRAG_REPEAT_WINDOW_MS = 45000;
 
+// ── Time-of-day categories ──────────────────────────────────────
+
+type TimeCategory = "morning" | "noon" | "afternoon" | "evening" | "night";
+
+function getTimeCategory(now = new Date()): TimeCategory {
+  const h = now.getHours();
+  if (h >= 6 && h < 11) return "morning";
+  if (h >= 11 && h < 14) return "noon";
+  if (h >= 14 && h < 18) return "afternoon";
+  if (h >= 18 && h < 22) return "evening";
+  return "night";
+}
+
 export class BehaviorEngine {
   private lastNudgeAtMs = 0;
   private nudgeBurstCount = 0;
@@ -180,15 +193,26 @@ export class BehaviorEngine {
   /** Pick the next idle action using mood-modulated weights. */
   private chooseIdleAction(pet: PetModel): void {
     const moodFactor = (pet.mood - 50) / 50; // -1 to +1
+    const tod = getTimeCategory();
+
+    // Time-of-day multipliers (applied after mood-based weights)
+    const todMultiplier: Record<TimeCategory, { walk: number; sleep: number; stretch: number; follow: number }> = {
+      morning:   { walk: 1.4, sleep: 0.4, stretch: 2.0, follow: 1.2 },
+      noon:      { walk: 0.5, sleep: 2.4, stretch: 0.6, follow: 0.6 },
+      afternoon: { walk: 1.0, sleep: 1.2, stretch: 1.0, follow: 1.0 },
+      evening:   { walk: 1.8, sleep: 0.3, stretch: 1.2, follow: 1.6 },
+      night:     { walk: 0.2, sleep: 3.2, stretch: 0.3, follow: 0.1 },
+    };
+    const tm = todMultiplier[tod];
 
     // Base weights at neutral mood (sum = 100)
-    const deferWeight  = 40;                                                    // fixed anchor
-    const walkWeight   = Math.max(0, 16 + moodFactor * 12);                    // ±12pp
-    const sitWeight    = 10;                                                    // fixed
-    const followWeight = Math.max(0, 8 + moodFactor * 8);                      // happy cats follow more
-    const groomWeight  = Math.max(0, 12 + Math.max(0, moodFactor) * 8);        // happy +8pp
-    const stretchWeight = Math.max(0, 12 + Math.max(0, moodFactor) * 8);       // happy +8pp
-    const sleepWeight  = Math.max(0, 10 + Math.max(0, -moodFactor) * 15);      // sad +15pp
+    const deferWeight  = 40;
+    const walkWeight   = Math.max(0, (16 + moodFactor * 12) * tm.walk);
+    const sitWeight    = 10;
+    const followWeight = Math.max(0, (8 + moodFactor * 8) * tm.follow);
+    const groomWeight  = Math.max(0, 12 + Math.max(0, moodFactor) * 8);
+    const stretchWeight = Math.max(0, (12 + Math.max(0, moodFactor) * 8) * tm.stretch);
+    const sleepWeight  = Math.max(0, (10 + Math.max(0, -moodFactor) * 15) * tm.sleep);
 
     const total = deferWeight + walkWeight + sitWeight + followWeight + groomWeight + stretchWeight + sleepWeight;
     const roll = Math.random() * total;
@@ -282,16 +306,27 @@ export class BehaviorEngine {
     // High mood → shorter delays (more active); low mood → longer delays (lethargic)
     const speedMultiplier = 1 - moodFactor * 0.4; // 1.4 (sad) to 0.6 (happy)
 
+    // Time-of-day speed modifier: evening = faster, night = slower
+    const todSpeed: Record<TimeCategory, number> = {
+      morning: 1.0,
+      noon: 1.5,
+      afternoon: 1.0,
+      evening: 0.65,
+      night: 2.5,
+    };
+    const tod = getTimeCategory();
+    const todMultiplier = todSpeed[tod];
+
     if (state === "idle") {
-      return Math.round(this.randomBetween(9000, 22000) * speedMultiplier);
+      return Math.round(this.randomBetween(9000, 22000) * speedMultiplier * todMultiplier);
     }
 
     if (state === "sit") {
-      return Math.round(this.randomBetween(12000, 26000) * speedMultiplier);
+      return Math.round(this.randomBetween(12000, 26000) * speedMultiplier * todMultiplier);
     }
 
     if (state === "sleep") {
-      return Math.round(this.randomBetween(9000, 18000) * speedMultiplier);
+      return Math.round(this.randomBetween(9000, 18000) * speedMultiplier * todMultiplier);
     }
 
     return Math.round(this.randomBetween(1200, 2400) * speedMultiplier);

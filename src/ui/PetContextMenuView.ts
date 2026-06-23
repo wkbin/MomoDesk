@@ -12,6 +12,7 @@ const PET_MENU_ITEMS: PetMenuItem[] = [
   { id: "feed", label: "投喂", icon: "🐟" },
   { id: "sleep", label: "哄睡", icon: "💤" },
   { id: "chat", label: "聊天", icon: "💬" },
+  { id: "tease", label: "逗猫", icon: "🪶" },
   { id: "play", label: "看我", icon: "👋" }
 ];
 

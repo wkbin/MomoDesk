@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   PhysicalPosition,
   LogicalSize,
+  availableMonitors,
   currentMonitor,
   cursorPosition,
   getCurrentWindow
@@ -21,12 +22,23 @@ import { DEFAULT_SETTINGS } from "../config/settings";
 import { MOOD_STORAGE_KEY, MOOD_UPDATED_EVENT, describeMood } from "../ui/mood";
 import { recordPetEvent, readPetEvents } from "../ui/petEvents";
 import type { PetEvent } from "../ui/petEvents";
+import {
+  recordSessionStart,
+  incrementCondition,
+  setCondition,
+  onAchievementUnlocked
+} from "../ui/achievements";
+import type { AchievementDef } from "../ui/achievements";
 
 const INITIAL_SIZE = 220;
 const SAVE_INTERVAL_MS = 5000;
 const PREVIEW_WALK_DURATION_MS = 6000;
 const PREVIEW_WALK_SPEED_PX_PER_SECOND = 60;
 const AUTONOMOUS_DESKTOP_WALK_SPEED_PX_PER_SECOND = 28;
+/** Window fall physics — matches BehaviorEngine values for consistent feel */
+const WINDOW_FALL_GRAVITY = 1500;
+const WINDOW_FALL_LANDING_DAMPING = 0.35;
+const WINDOW_FALL_STOP_VELOCITY = 85;
 const IDLE_LOOP_START_FRAME = 6;
 const IDLE_LOOP_END_FRAME = 59;
 const WALK_LEFT_LOOP_START_FRAME = 39;
@@ -49,8 +61,8 @@ const MANUAL_LOOK_DURATION_MS = 8000;
 const AI_MOOD_MIN_INTERVAL_MS = 180000;
 const AI_MOOD_LOOKBACK_MS = 600000;
 const AI_MOOD_MIN_EVENTS = 4;
-const PROACTIVE_BUBBLE_MIN_INTERVAL_MS = 600000;
-const PROACTIVE_BUBBLE_MIN_SESSION_MS = 90000;
+const PROACTIVE_BUBBLE_MIN_INTERVAL_MS = 300_000;
+const PROACTIVE_BUBBLE_MIN_SESSION_MS = 90_000;
 const PROACTIVE_BUBBLE_CHANCE = 0.003;
 const TAURI_AVAILABLE = "__TAURI_INTERNALS__" in window;
 const DEFAULT_STATIC_IMAGE_URL = new URL(
@@ -132,7 +144,18 @@ export class MomoDeskApp {
     minY: number;
     maxY: number;
   } | null = null;
+  /** Tracks window-level fall physics after drag release */
+  private windowFallState: {
+    windowX: number;
+    windowY: number;
+    velocityY: number;
+    floorY: number;
+  } | null = null;
   private pendingDesktopWindowPosition: { x: number; y: number } | null = null;
+  /** Last window position during drag — independently tracked so
+   *  flushDesktopWindowMove consuming pendingDesktopWindowPosition
+   *  doesn't lose it before endDesktopDrag reads it. */
+  private lastDragWindowPosition: { x: number; y: number } | null = null;
   private desktopWindowMoveInFlight = false;
   private desktopAutonomousWalkStarting = false;
   private mouseCanvasX = 0;
@@ -154,6 +177,33 @@ export class MomoDeskApp {
   private lastProactiveTrigger = "";
   private readonly LOOK_RADIUS = 130;
   private readonly LOOK_INNER_DEAD_ZONE = 28;
+  // Achievement tracking
+  private sessionMinuteTimer = 0;
+  private achievementToastTimer = 0;
+  private achievementWindow: WebviewWindow | null = null;
+  // Petting system
+  private pettingStartMs = 0;
+  private lastHeartSpawnMs = 0;
+  private pettingAnnoyed = false;
+  private readonly HEART_SPAWN_INTERVAL_MS = 420;
+  private readonly PETTING_THRESHOLD_MS = 1500;
+  private readonly PURR_THRESHOLD_MS = 3500;
+  private readonly ANNOY_THRESHOLD_MS = 11000;
+  // Teaser wand system
+  private teaserActive = false;
+  private teaserScreenX = 0;
+  private teaserScreenY = 0;
+  private teaserCatchCount = 0;
+  private teaserCooldownUntilMs = 0;
+  private teaserWindow: WebviewWindow | null = null;
+  private teaserActivationInFlight = false;
+  private lastTeaserUpdateMs = 0;
+  private teaserUpdateInFlight = false;
+  private teaserStartedAtMs = 0;
+  private readonly TEASER_UPDATE_MS = 16;
+  private readonly TEASER_TIMEOUT_MS = 20_000; // auto-dismiss after 20s
+  private readonly TEASER_MAX_CATCHES = 1;
+  private readonly TEASER_CATCH_RADIUS = 52;
 
   constructor(private readonly canvas: HTMLCanvasElement) {
     const floorY = INITIAL_SIZE * 0.74;
@@ -171,7 +221,7 @@ export class MomoDeskApp {
     };
     this.lastSavedState = this.pet.state;
 
-    this.renderer = new CanvasPetRenderer(canvas);
+    this.renderer = new CanvasPetRenderer(canvas, { useStaticImageCssFallback: true });
     this.behavior = new BehaviorEngine({
       width: INITIAL_SIZE,
       height: INITIAL_SIZE,
@@ -181,9 +231,16 @@ export class MomoDeskApp {
       onDesktopDragStart: TAURI_AVAILABLE ? this.beginDesktopDrag : undefined,
       onDesktopDragMove: TAURI_AVAILABLE ? this.updateDesktopDrag : undefined,
       onDesktopDragEnd: TAURI_AVAILABLE ? this.endDesktopDrag : undefined,
-      onDragStart: () => this.recordInteractionEvent("drag_start"),
-      onDragEnd: () => this.recordInteractionEvent("drag_end"),
-      onNudge: () => this.recordInteractionEvent("nudge"),
+      onDragStart: () => {
+            this.recordInteractionEvent("drag_start");
+      },
+      onDragEnd: () => {
+        incrementCondition("drag_count");
+        this.recordInteractionEvent("drag_end");
+      },
+      onNudge: () => {
+            this.recordInteractionEvent("nudge");
+      },
       windowDragHitRadius: TAURI_AVAILABLE ? 96 : undefined
     });
   }
@@ -200,6 +257,9 @@ export class MomoDeskApp {
 
     window.addEventListener("resize", this.onResize);
     window.addEventListener("keydown", this.onPreviewKeyDown);
+    window.addEventListener("blur", this.onBlur);
+    window.addEventListener("focus", this.onFocus);
+    document.addEventListener("visibilitychange", this.onVisibilityChange);
     this.canvas.addEventListener("contextmenu", this.onContextMenu);
     this.canvas.addEventListener("pointermove", this.onPointerMove);
     this.canvas.addEventListener("pointerleave", this.onPointerLeave);
@@ -220,13 +280,25 @@ export class MomoDeskApp {
       this.clickThroughEnabled = true;
       await this.ensureWindowOnScreen();
     }
+
+    // Achievement system: record session start and listen for unlocks
+    recordSessionStart();
+    onAchievementUnlocked((def) => { void this.showAchievementToast(def); });
+    // Periodic session minute counter (fires roughly every 60s of loop time)
+    this.sessionMinuteTimer = window.setInterval(() => {
+      incrementCondition("total_session_minutes", 1);
+    }, 60_000);
   }
 
   stop(): void {
     window.cancelAnimationFrame(this.rafId);
     window.clearInterval(this.saveTimerId);
+    window.clearInterval(this.sessionMinuteTimer);
     window.removeEventListener("resize", this.onResize);
     window.removeEventListener("keydown", this.onPreviewKeyDown);
+    window.removeEventListener("blur", this.onBlur);
+    window.removeEventListener("focus", this.onFocus);
+    document.removeEventListener("visibilitychange", this.onVisibilityChange);
     this.canvas.removeEventListener("contextmenu", this.onContextMenu);
     this.canvas.removeEventListener("pointermove", this.onPointerMove);
     this.canvas.removeEventListener("pointerleave", this.onPointerLeave);
@@ -244,6 +316,16 @@ export class MomoDeskApp {
     this.chatWindow = null;
     void this.settingsWindow?.hide();
     this.settingsWindow = null;
+    if (this.teaserWindow) {
+      void this.teaserWindow.close();
+      this.teaserWindow = null;
+    }
+    // Clean up orphaned teaser window
+    void WebviewWindow.getByLabel("teaser-dot").then((w) => w?.close());
+    if (this.achievementWindow) {
+      void this.achievementWindow.close();
+      this.achievementWindow = null;
+    }
     void this.savePetState();
   }
 
@@ -337,7 +419,9 @@ export class MomoDeskApp {
         loopEndFrame: this.getAnimationLoopEndFrame(animationKey, animation)
       });
     }
-    await this.renderer.preloadFrameAnimations();
+    // Preload frame animations in background — don't block first paint.
+    // Static image renders immediately while frames decode asynchronously.
+    void this.renderer.preloadFrameAnimations();
   }
 
   private getAnimationLoopStartFrame(
@@ -485,6 +569,10 @@ export class MomoDeskApp {
     }
     this.keepPetAnchoredInDesktopWindow();
     this.keepDesktopPreviewInIdle();
+    this.updatePetting(now);
+    void this.updateTeaser(now);
+
+    // Always render at full speed — throttling makes the cat look stuttery
     void this.updateLookAtMouse();
     this.renderer.render(this.pet, now);
     this.saveOnStateChange();
@@ -494,6 +582,24 @@ export class MomoDeskApp {
     this.updateClickThrough(now);
 
     this.rafId = window.requestAnimationFrame(this.loop);
+  };
+
+  private recordUserInteraction(): void {
+    // Reserved for future use (e.g., idle detection)
+  }
+
+  private readonly onBlur = (): void => {
+    // Window lost focus — no action needed
+  };
+
+  private readonly onFocus = (): void => {
+    this.lastFrame = performance.now(); // prevent delta spike after backgrounding
+  };
+
+  private readonly onVisibilityChange = (): void => {
+    if (document.visibilityState === "visible") {
+      this.lastFrame = performance.now(); // prevent delta spike after tab backgrounding
+    }
   };
 
   private keepPetAnchoredInDesktopWindow(): void {
@@ -512,6 +618,11 @@ export class MomoDeskApp {
       return;
     }
 
+    // Don't override during teaser chase — walk state is driven by updateTeaser
+    if (this.teaserActive) {
+      return;
+    }
+
     // sleep_to_idle is a transient one-shot; let it play out
     if (this.pet.state === "sleep_to_idle") {
       return;
@@ -521,6 +632,15 @@ export class MomoDeskApp {
   }
 
   private async updateDesktopAutonomy(deltaMs: number, now: number): Promise<void> {
+    // When teaser is active, let updateTeaser handle movement — don't interfere
+    if (this.teaserActive) {
+      // Advance animation timer so walk/stretch/groom frames actually play
+      if (this.pet.state === "stretch" || this.pet.state === "groom" || this.pet.state === "walk") {
+        this.pet.stateElapsedMs += deltaMs;
+      }
+      return;
+    }
+
     if ((this.windowWalkAnimation?.returnToIdleOnDone || this.windowWalkAnimation?.thenSitAndLook)
         && this.pet.state === "walk") {
       this.pet.stateElapsedMs += deltaMs;
@@ -540,6 +660,27 @@ export class MomoDeskApp {
           await this.startAutonomousDesktopWalk(now);
         }
       }
+      return;
+    }
+
+    // Desktop fall: move the entire window with gravity + bounce physics.
+    if (this.pet.state === "fall") {
+      // Advance animation timer manually — don't call behavior.update()
+      // (its updateFall would fight with the canvas anchor).
+      this.pet.stateElapsedMs += deltaMs;
+
+      if (this.windowFallState) {
+        // Normal path: physics controls window movement and landing
+        await this.updateDesktopFall(deltaMs);
+      } else {
+        // Safety net: if windowFallState failed to initialize (IPC error, etc.),
+        // use the one-shot timer to avoid getting stuck in "fall" forever
+        const oneShotMs = this.getDesktopOneShotDurationMs(this.pet.state);
+        if (oneShotMs !== null && this.pet.stateElapsedMs >= oneShotMs) {
+          this.behavior.setState(this.pet, "idle");
+        }
+      }
+
       return;
     }
 
@@ -672,8 +813,9 @@ export class MomoDeskApp {
         label: "投喂",
         icon: "🐟",
         action: () => {
-          this.cancelDesktopMotion();
+                this.cancelDesktopMotion();
           this.behavior.feed(this.pet);
+          incrementCondition("feed_count");
           this.recordInteractionEvent("feed");
           void this.savePetState();
         }
@@ -683,8 +825,9 @@ export class MomoDeskApp {
         label: "哄睡",
         icon: "💤",
         action: () => {
-          this.cancelDesktopMotion();
+                this.cancelDesktopMotion();
           this.behavior.sleep(this.pet);
+          incrementCondition("sleep_count");
           this.recordInteractionEvent("sleep");
           void this.savePetState();
         }
@@ -694,9 +837,19 @@ export class MomoDeskApp {
         label: "聊天",
         icon: "💬",
         action: () => {
-          window.setTimeout(() => {
+                window.setTimeout(() => {
             void this.openChatBubbleWindow();
           }, 10);
+        }
+      },
+      {
+        id: "tease",
+        label: "逗猫",
+        icon: "🪶",
+        action: () => {
+          void this.activateTeaser().catch((err) => {
+            console.warn("Failed to activate teaser:", err);
+          });
         }
       },
       {
@@ -704,7 +857,7 @@ export class MomoDeskApp {
         label: "看我",
         icon: "👋",
         action: () => {
-          this.startLookAtMouse(performance.now(), MANUAL_LOOK_DURATION_MS);
+                this.startLookAtMouse(performance.now(), MANUAL_LOOK_DURATION_MS);
           this.recordInteractionEvent("look");
           void this.savePetState();
         }
@@ -784,6 +937,9 @@ export class MomoDeskApp {
           mood: snapshot.mood,
           state: this.pet.state
         });
+        // Track mood extremes for achievements
+        setCondition("mood_peak", snapshot.mood);
+        setCondition("mood_low", snapshot.mood);
       }
     } catch {
       // localStorage can fail in restricted preview contexts; behavior still works.
@@ -919,22 +1075,44 @@ export class MomoDeskApp {
   }
 
   private getProactiveTrigger(): string | null {
+    const now = new Date();
+    const hour = now.getHours();
+    const sessionMinutes = Math.floor((performance.now() - this.startedAtMs) / 60_000);
+
+    // Time-of-day triggers
+    if (hour >= 6 && hour < 9 && this.pet.state === "idle") {
+      return "早上问候";
+    }
+    if (hour >= 22 || hour < 1) {
+      if (this.pet.state !== "sleep" && this.pet.state !== "drag" && this.pet.state !== "fall") {
+        return "深夜提醒休息";
+      }
+    }
+    if (hour >= 13 && hour < 15 && this.pet.state === "idle") {
+      return "午后犯困";
+    }
+
+    // Session-based triggers
+    if (sessionMinutes > 120 && this.pet.state === "idle" && this.pet.mood > 40) {
+      return "陪伴很久，想被注意到";
+    }
+
+    // State-based triggers
+    if (this.pet.state === "sleep_to_idle" && this.pet.stateElapsedMs > 3000) {
+      return "刚睡醒";
+    }
     if (this.pet.state === "sit" && this.pet.stateElapsedMs > 120000) {
       return "坐久了，提醒用户休息";
     }
-
     if ((this.pet.state === "idle" || this.pet.state === "sit") && this.pet.mood < 28) {
       return "心情低，想要一点陪伴";
     }
-
     if (this.pet.state === "idle" && this.pet.stateElapsedMs > 180000) {
       return "空闲很久，想轻轻搭话";
     }
-
     if (this.pet.state === "idle" && this.pet.mood > 78) {
       return "心情很好，想分享小事";
     }
-
     if (this.pet.state === "idle" && this.pet.mood < 48) {
       return "有点饿，想要小鱼干";
     }
@@ -1428,16 +1606,15 @@ export class MomoDeskApp {
 
     const window = getCurrentWindow();
     try {
-      const [position, size, monitor] = await Promise.all([
+      const [position, size] = await Promise.all([
         window.outerPosition(),
-        window.outerSize(),
-        currentMonitor()
+        window.outerSize()
       ]);
       const distance = (durationMs / 1000) * PREVIEW_WALK_SPEED_PX_PER_SECOND;
       const signedDistance = facing === "left" ? -distance : distance;
       const targetX = position.x + signedDistance;
       const targetY = position.y;
-      const bounds = monitor?.workArea ?? monitor;
+      const bounds = await this.getAllMonitorsBounds();
       this.windowWalkAnimation = {
         startedAt: now,
         durationMs,
@@ -1464,13 +1641,12 @@ export class MomoDeskApp {
     this.pet.followMouse = false;
 
     try {
-      const [position, size, cursor, monitor] = await Promise.all([
+      const [position, size, cursor] = await Promise.all([
         getCurrentWindow().outerPosition(),
         getCurrentWindow().outerSize(),
-        cursorPosition(),
-        currentMonitor()
+        cursorPosition()
       ]);
-      const bounds = monitor?.workArea ?? monitor;
+      const bounds = await this.getAllMonitorsBounds();
 
       // Walk so the cat center ends up ~60px away from the cursor.
       const directionX = position.x + size.width / 2 < cursor.x ? -1 : 1;
@@ -1527,12 +1703,11 @@ export class MomoDeskApp {
     const window = getCurrentWindow();
 
     try {
-      const [position, size, monitor] = await Promise.all([
+      const [position, size] = await Promise.all([
         window.outerPosition(),
-        window.outerSize(),
-        currentMonitor()
+        window.outerSize()
       ]);
-      const bounds = monitor?.workArea ?? monitor;
+      const bounds = await this.getAllMonitorsBounds();
       const direction = Math.random() < 0.5 ? -1 : 1;
       const distance = 80 + Math.random() * 120;
       const targetX = position.x + direction * distance;
@@ -1597,21 +1772,70 @@ export class MomoDeskApp {
     }
   }
 
+  /** Apply gravity + bounce physics to the entire window after drag release */
+  private async updateDesktopFall(deltaMs: number): Promise<void> {
+    const fall = this.windowFallState;
+    if (!fall) {
+      return;
+    }
+
+    const dt = deltaMs / 1000;
+    fall.velocityY += WINDOW_FALL_GRAVITY * dt;
+    fall.windowY += fall.velocityY * dt;
+
+    // Floor collision — window bottom hits the work area bottom
+    if (fall.windowY >= fall.floorY) {
+      fall.windowY = fall.floorY;
+      fall.velocityY *= -WINDOW_FALL_LANDING_DAMPING;
+
+      // Stop bouncing when velocity is low enough
+      if (Math.abs(fall.velocityY) < WINDOW_FALL_STOP_VELOCITY) {
+        this.windowFallState = null;
+        this.behavior.setState(this.pet, "idle");
+        await this.safeTauri(
+          () =>
+            getCurrentWindow().setPosition(
+              new PhysicalPosition(Math.round(fall.windowX), Math.round(fall.windowY))
+            ),
+          "Failed to land pet window"
+        );
+        return;
+      }
+    }
+
+    // Clamp against top of the monitor so the cat doesn't fly above the screen
+    // on the upward bounce
+    if (fall.windowY < fall.floorY - 400) {
+      fall.windowY = fall.floorY - 400;
+      fall.velocityY = 0;
+    }
+
+    await this.safeTauri(
+      () =>
+        getCurrentWindow().setPosition(
+          new PhysicalPosition(Math.round(fall.windowX), Math.round(fall.windowY))
+        ),
+      "Failed to animate pet window fall"
+    );
+  }
+
   private beginDesktopDrag = (screenPoint: { x: number; y: number }): void => {
     this.previewStateUntilMs = 0;
     this.windowWalkAnimation = null;
+    this.windowFallState = null;
+    this.lastDragWindowPosition = null;
     this.desktopAutonomousWalkStarting = false;
     this.stopLookAtMouse();
 
     void this.safeTauri(async () => {
       const window = getCurrentWindow();
-      const [position, size, monitor] = await Promise.all([
+      const [position, size] = await Promise.all([
         window.outerPosition(),
-        window.outerSize(),
-        currentMonitor()
+        window.outerSize()
       ]);
 
-      const workArea = monitor?.workArea ?? monitor;
+      const bounds = await this.getAllMonitorsBounds();
+      const workArea = bounds;
       this.desktopDragOrigin = {
         pointerX: screenPoint.x,
         pointerY: screenPoint.y,
@@ -1646,6 +1870,9 @@ export class MomoDeskApp {
           y: this.clamp(nextPosition.y, this.desktopDragBounds.minY, this.desktopDragBounds.maxY)
         }
       : nextPosition;
+    // Keep an independent copy so endDesktopDrag can read it even after
+    // flushDesktopWindowMove consumes pendingDesktopWindowPosition.
+    this.lastDragWindowPosition = { ...this.pendingDesktopWindowPosition };
 
     if (this.desktopWindowMoveInFlight) {
       return;
@@ -1656,10 +1883,56 @@ export class MomoDeskApp {
   };
 
   private endDesktopDrag = (): void => {
+    // Use the independently-tracked computed position from the last drag
+    // update.  window.screenX/Y is unreliable in Tauri v2 (often 0), so we
+    // cannot use it — fall back to the drag-system position which is the
+    // best synchronous estimate available.  An async IPC correction follows
+    // within 1-2 frames via refineWindowFallFloor.
+    const lastDragPosition = this.lastDragWindowPosition;
+
     this.desktopDragOrigin = null;
     this.desktopDragBounds = null;
     this.pendingDesktopWindowPosition = null;
+    this.lastDragWindowPosition = null;
+
+    if (lastDragPosition) {
+      // Use monitor work area bottom as floor estimate.
+      // The fallback uses screen.availHeight as the total work area height
+      // (from top of screen to bottom of taskbar). The window anchor is at
+      // the top-left, so floor = workAreaBottom - windowHeight.
+      const windowHeight = this.getScaledSize();
+      const estimatedFloor = (window.screen?.availHeight ?? 1080) - windowHeight;
+      this.windowFallState = {
+        windowX: lastDragPosition.x,
+        windowY: lastDragPosition.y,
+        velocityY: 180,
+        floorY: estimatedFloor
+      };
+      void this.refineWindowFallFloor();
+    }
   };
+
+  /** Fetch the real floorY from monitor bounds and correct the fall
+   *  start position from the actual window position (Tauri IPC). */
+  private async refineWindowFallFloor(): Promise<void> {
+    try {
+      const [size, bounds] = await Promise.all([
+        getCurrentWindow().outerSize(),
+        this.getAllMonitorsBounds()
+      ]);
+      if (this.windowFallState && bounds) {
+        // Only correct floorY from actual monitor bounds.
+        // Don't overwrite windowX/Y — lastDragPosition is already accurate
+        // and overwriting causes a visible position jump.
+        this.windowFallState.floorY = bounds.position.y + bounds.size.height - size.height;
+      }
+    } catch {
+      // Fallback: use screen bottom as floor
+      if (this.windowFallState) {
+        this.windowFallState.floorY = (window.screen?.availHeight ?? 1080) - this.getScaledSize();
+      }
+    }
+  }
 
   private async flushDesktopWindowMove(): Promise<void> {
     while (this.pendingDesktopWindowPosition) {
@@ -1685,6 +1958,44 @@ export class MomoDeskApp {
     return state === "drag" ? "fall"
       : state === "sleep_to_idle" ? "idle"
       : state;
+  }
+
+  /** Get the union (bounding box) of all monitor work areas, or fall back to the current monitor. */
+  private async getAllMonitorsBounds(): Promise<{
+    position: { x: number; y: number };
+    size: { width: number; height: number };
+  } | null> {
+    try {
+      const monitors = await availableMonitors();
+      if (monitors.length === 0) {
+        return null;
+      }
+
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+
+      for (const m of monitors) {
+        const area = m.workArea ?? m;
+        minX = Math.min(minX, area.position.x);
+        minY = Math.min(minY, area.position.y);
+        maxX = Math.max(maxX, area.position.x + area.size.width);
+        maxY = Math.max(maxY, area.position.y + area.size.height);
+      }
+
+      return {
+        position: { x: minX, y: minY },
+        size: { width: maxX - minX, height: maxY - minY }
+      };
+    } catch {
+      // Fall back to current monitor
+      const monitor = await currentMonitor();
+      if (!monitor) {
+        return null;
+      }
+      return monitor.workArea ?? monitor;
+    }
   }
 
   private getScaledSize(): number {
@@ -1720,6 +2031,327 @@ export class MomoDeskApp {
       await operation();
     } catch (error) {
       console.warn(message, error);
+    }
+  }
+
+  // ── Petting system ──────────────────────────────────────────────────
+
+  private updatePetting(now: number): void {
+    // Petting only when mouse hovers over the cat and the cat isn't being dragged
+    if (!this.mouseInCanvas || this.pet.state === "drag" || this.pet.state === "fall") {
+      this.pettingStartMs = 0;
+      this.lastHeartSpawnMs = 0;
+      this.pettingAnnoyed = false;
+      return;
+    }
+
+    // Check if mouse is close enough to the cat for petting
+    const dx = this.mouseCanvasX - this.pet.position.x;
+    const dy = this.mouseCanvasY - this.pet.position.y;
+    const pettingRadius = 52;
+    const hovering = dx * dx + dy * dy < pettingRadius * pettingRadius;
+
+    if (!hovering) {
+      this.pettingStartMs = 0;
+      this.lastHeartSpawnMs = 0;
+      return;
+    }
+
+    if (this.pettingStartMs === 0) {
+      this.pettingStartMs = now;
+      this.lastHeartSpawnMs = now;
+      return;
+    }
+
+    const elapsed = now - this.pettingStartMs;
+
+    // Spawn heart particles at intervals
+    if (now - this.lastHeartSpawnMs >= this.HEART_SPAWN_INTERVAL_MS) {
+      this.lastHeartSpawnMs = now;
+      this.spawnHeart(this.mouseCanvasX, this.mouseCanvasY - 18);
+    }
+
+    // Purr reaction after sustained petting
+    if (elapsed >= this.PURR_THRESHOLD_MS && !this.pettingAnnoyed) {
+      // Subtle mood boost (cap once per petting session)
+      if (elapsed < this.PURR_THRESHOLD_MS + 1200) {
+        this.behavior.applyExternalMoodAdjustment(this.pet, 1.2);
+      }
+      // Gentle screen shake
+      this.triggerPurrShake();
+    }
+
+    // Cat gets annoyed at excessive petting
+    if (elapsed >= this.ANNOY_THRESHOLD_MS && !this.pettingAnnoyed) {
+      this.pettingAnnoyed = true;
+      this.behavior.applyExternalMoodAdjustment(this.pet, -3);
+      // Trigger a nudge-like reaction
+      this.behavior.nudgeInteraction(this.pet);
+      this.recordInteractionEvent("nudge");
+    }
+  }
+
+  private spawnHeart(cx: number, cy: number): void {
+    const rect = this.canvas.getBoundingClientRect();
+    const ratio = window.devicePixelRatio || 1;
+    const logicalWidth = this.canvas.width / ratio;
+    const logicalHeight = this.canvas.height / ratio;
+    const screenX = rect.left + (cx / logicalWidth) * rect.width;
+    const screenY = rect.top + (cy / logicalHeight) * rect.height;
+
+    const heart = document.createElement("span");
+    heart.className = "petting-heart";
+    heart.textContent = ["❤️", "💕", "💖", "✨"][Math.floor(Math.random() * 4)];
+    heart.style.cssText = `
+      position:fixed;pointer-events:none;z-index:9998;font-size:16px;
+      left:${screenX - 8}px;top:${screenY}px;
+      animation:pet-heart-float .9s ease-out forwards;
+    `;
+    document.body.appendChild(heart);
+    heart.addEventListener("animationend", () => heart.remove());
+  }
+
+  private triggerPurrShake(): void {
+    // Subtle canvas shake via CSS — self-clearing
+    this.canvas.style.animation = "none";
+    void this.canvas.offsetHeight; // force reflow
+    this.canvas.style.animation = "pet-purr-shake .45s ease-out";
+  }
+
+  // ── Teaser wand (floating window) ──────────────────────────────────
+
+  private async activateTeaser(): Promise<void> {
+    if (!TAURI_AVAILABLE || this.teaserActivationInFlight) return;
+
+    this.teaserActivationInFlight = true;
+    this.teaserActive = false;
+
+    this.teaserCatchCount = 0;
+    this.teaserCooldownUntilMs = 0;
+    this.lastTeaserUpdateMs = 0;
+
+    try {
+      const cursor = await cursorPosition();
+      this.teaserScreenX = cursor.x;
+      this.teaserScreenY = cursor.y;
+
+      if (!this.teaserWindow) {
+        this.teaserWindow = await WebviewWindow.getByLabel("teaser-dot");
+      }
+      await this.ensureTeaserWindow();
+
+      const teaserWindow = this.teaserWindow;
+      if (!teaserWindow) {
+        throw new Error("teaser window is unavailable");
+      }
+
+      const dotSize = 22;
+      await teaserWindow.setPosition(
+        new PhysicalPosition(
+          Math.round(this.teaserScreenX - dotSize / 2),
+          Math.round(this.teaserScreenY - dotSize / 2)
+        )
+      );
+      await teaserWindow.show();
+      this.teaserStartedAtMs = performance.now();
+      this.teaserActive = true;
+    } catch (err) {
+      console.warn("activateTeaser failed:", err);
+      this.teaserActive = false;
+      await this.discardTeaserWindow();
+    } finally {
+      this.teaserActivationInFlight = false;
+    }
+  }
+
+  private async updateTeaser(now: number): Promise<void> {
+    if (!this.teaserActive || !this.teaserWindow) return;
+    if (this.teaserUpdateInFlight) return;
+    if (now - this.lastTeaserUpdateMs < this.TEASER_UPDATE_MS) return;
+
+    const elapsedMs = this.lastTeaserUpdateMs > 0
+      ? Math.min(now - this.lastTeaserUpdateMs, 100)
+      : this.TEASER_UPDATE_MS;
+    this.lastTeaserUpdateMs = now;
+    this.teaserUpdateInFlight = true;
+
+    const teaserWindow = this.teaserWindow;
+    try {
+      // Auto-dismiss after timeout
+      if (now - this.teaserStartedAtMs > this.TEASER_TIMEOUT_MS) {
+        await this.deactivateTeaser();
+        return;
+      }
+
+      // Fetch independent window values together to keep chase updates close to display refresh rate.
+      const petWindow = getCurrentWindow();
+      const [cursor, petPos, petSize] = await Promise.all([
+        cursorPosition(),
+        petWindow.outerPosition(),
+        petWindow.outerSize()
+      ]);
+      if (!this.teaserActive || this.teaserWindow !== teaserWindow) return;
+
+      // Time-based interpolation keeps movement speed stable when IPC latency varies.
+      const elapsedSeconds = elapsedMs / 1000;
+      const lerp = 1 - Math.exp(-5 * elapsedSeconds);
+      this.teaserScreenX += (cursor.x - this.teaserScreenX) * lerp;
+      this.teaserScreenY += (cursor.y - this.teaserScreenY) * lerp;
+
+      const dotSize = 22;
+      await teaserWindow.setPosition(
+        new PhysicalPosition(
+          Math.round(this.teaserScreenX - dotSize / 2),
+          Math.round(this.teaserScreenY - dotSize / 2)
+        )
+      );
+      if (!this.teaserActive || this.teaserWindow !== teaserWindow) return;
+
+      // Tauri returns physical screen coordinates. Derive the cat center and hit
+      // radius from the actual physical window size so high-DPI displays work too.
+      const catOffsetX = petSize.width * (this.pet.position.x / INITIAL_SIZE);
+      const catOffsetY = petSize.height * (this.pet.position.y / INITIAL_SIZE);
+      const catScreenX = petPos.x + catOffsetX;
+      const catScreenY = petPos.y + catOffsetY;
+      const dx = catScreenX - this.teaserScreenX;
+      const dy = catScreenY - this.teaserScreenY;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const physicalScale = Math.min(petSize.width, petSize.height) / INITIAL_SIZE;
+
+      // Catch detection (skip during cooldown)
+      if (now >= this.teaserCooldownUntilMs && dist < this.TEASER_CATCH_RADIUS * physicalScale) {
+        this.teaserCatchCount++;
+        this.behavior.applyExternalMoodAdjustment(this.pet, 2.5);
+        this.behavior.setState(this.pet, "stretch");
+
+        const isLastCatch = this.teaserCatchCount >= this.TEASER_MAX_CATCHES;
+
+        if (isLastCatch) {
+          // Final catch: deactivate immediately; cleanup hides before closing.
+          await this.deactivateTeaser();
+          return;
+        }
+
+        // Not the last catch: hide briefly, teleport, show again
+        this.teaserCooldownUntilMs = now + 1200;
+        await teaserWindow.hide();
+        await new Promise((r) => setTimeout(r, 150));
+        this.teaserScreenX = catScreenX + (Math.random() - 0.5) * 300;
+        this.teaserScreenY = catScreenY - 40 - Math.random() * 120;
+        await teaserWindow.setPosition(
+          new PhysicalPosition(
+            Math.round(this.teaserScreenX - 22 / 2),
+            Math.round(this.teaserScreenY - 22 / 2)
+          )
+        );
+        await teaserWindow.show();
+        return;
+      }
+
+      // Chase: walk toward the teaser dot (skip during cooldown)
+      if (now >= this.teaserCooldownUntilMs) {
+        // Set walk state so the renderer plays walk_left/walk_right animation.
+        // dx < 0 means dot is to the right → face right.
+        this.pet.facing = dx < 0 ? "right" : "left";
+        this.behavior.setState(this.pet, "walk");
+
+        const targetWindowX = this.teaserScreenX - catOffsetX;
+        const targetWindowY = this.teaserScreenY - catOffsetY;
+        const chaseLerp = 1 - Math.exp(-1.03 * elapsedSeconds);
+        const newX = petPos.x + (targetWindowX - petPos.x) * chaseLerp;
+        const newY = petPos.y + (targetWindowY - petPos.y) * chaseLerp;
+
+        this.pendingDesktopWindowPosition = { x: Math.round(newX), y: Math.round(newY) };
+        if (!this.desktopWindowMoveInFlight) {
+          this.desktopWindowMoveInFlight = true;
+          void this.flushDesktopWindowMove();
+        }
+      }
+    } catch {
+      // Cursor/position calls may fail transiently
+    } finally {
+      this.teaserUpdateInFlight = false;
+    }
+  }
+
+  private async ensureTeaserWindow(): Promise<void> {
+    if (this.teaserWindow) return;
+    const dotSize = 22;
+    const win = new WebviewWindow("teaser-dot", {
+      url: "/?view=teaser-dot",
+      title: "",
+      width: dotSize,
+      height: dotSize,
+      x: Math.round(this.teaserScreenX - dotSize / 2),
+      y: Math.round(this.teaserScreenY - dotSize / 2),
+      visible: false,
+      decorations: false,
+      transparent: true,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      resizable: false,
+      maximizable: false,
+      minimizable: false,
+      focus: false,
+      shadow: false
+    });
+
+    // Wait for the window to actually be created (same pattern as chat bubble)
+    await Promise.race([
+      new Promise<void>((resolve, reject) => {
+        void win.once("tauri://created", () => resolve());
+        void win.once("tauri://error", (e) => reject(new Error(String(e.payload))));
+      }),
+      new Promise<void>((_, reject) =>
+        setTimeout(() => reject(new Error("teaser window creation timed out")), 3000)
+      )
+    ]);
+
+    this.teaserWindow = win;
+  }
+
+  private async deactivateTeaser(): Promise<void> {
+    this.teaserActive = false;
+    let teaserWindow = this.teaserWindow;
+    if (!teaserWindow) {
+      try {
+        teaserWindow = await WebviewWindow.getByLabel("teaser-dot");
+      } catch {
+        teaserWindow = null;
+      }
+    }
+
+    if (!teaserWindow) return;
+
+    try {
+      await teaserWindow.hide();
+      this.teaserWindow = teaserWindow;
+    } catch {
+      // If the retained handle is stale, remove it so the next activation can recreate it.
+      try { await teaserWindow.close(); } catch { /* ignore */ }
+      if (this.teaserWindow === teaserWindow) {
+        this.teaserWindow = null;
+      }
+    }
+  }
+
+  private async discardTeaserWindow(): Promise<void> {
+    const retainedWindow = this.teaserWindow;
+    this.teaserWindow = null;
+
+    if (retainedWindow) {
+      try { await retainedWindow.hide(); } catch { /* ignore */ }
+      try { await retainedWindow.close(); } catch { /* ignore */ }
+    }
+
+    try {
+      const orphan = await WebviewWindow.getByLabel("teaser-dot");
+      if (orphan) {
+        try { await orphan.hide(); } catch { /* ignore */ }
+        try { await orphan.close(); } catch { /* ignore */ }
+      }
+    } catch {
+      // Window may already be gone.
     }
   }
 
@@ -1775,24 +2407,27 @@ export class MomoDeskApp {
   private async ensureWindowOnScreen(): Promise<void> {
     try {
       const window = getCurrentWindow();
-      const [position, monitor] = await Promise.all([
+      const [position, monitors] = await Promise.all([
         window.outerPosition(),
-        currentMonitor()
+        availableMonitors()
       ]);
-      const bounds = monitor?.workArea ?? monitor;
-      if (!bounds) {
+      if (monitors.length === 0) {
         return;
       }
 
-      // Check if the window center is within any reasonable area of the monitor
+      // Check if the window center is within ANY monitor's work area
       const cx = position.x + INITIAL_SIZE / 2;
       const cy = position.y + INITIAL_SIZE / 2;
       const margin = 40;
-      const onScreen =
-        cx >= bounds.position.x + margin &&
-        cx <= bounds.position.x + bounds.size.width - margin &&
-        cy >= bounds.position.y + margin &&
-        cy <= bounds.position.y + bounds.size.height - margin;
+      const onScreen = monitors.some((m) => {
+        const area = m.workArea ?? m;
+        return (
+          cx >= area.position.x + margin &&
+          cx <= area.position.x + area.size.width - margin &&
+          cy >= area.position.y + margin &&
+          cy <= area.position.y + area.size.height - margin
+        );
+      });
 
       if (!onScreen) {
         // Window is off-screen (e.g., monitor was disconnected) — center it
@@ -1823,5 +2458,86 @@ export class MomoDeskApp {
       await window.setAlwaysOnTop(false);
       await window.setAlwaysOnTop(true);
     }, "Failed to refresh pet window always-on-top state");
+  }
+
+  // ── Achievement toast (floating window) ───────────────────────────
+
+  private async showAchievementToast(def: AchievementDef): Promise<void> {
+    if (!TAURI_AVAILABLE) return;
+
+    try {
+      const petWindow = getCurrentWindow();
+      const [petPos, petSize] = await Promise.all([
+        petWindow.outerPosition(),
+        petWindow.outerSize()
+      ]);
+
+      // Position above the pet window
+      const toastWidth = 210;
+      const toastHeight = 44;
+      const x = Math.round(petPos.x + petSize.width / 2 - toastWidth / 2);
+      const y = Math.round(petPos.y - toastHeight - 10);
+
+      // Close any existing toast
+      if (this.achievementWindow) {
+        void this.achievementWindow.close();
+        this.achievementWindow = null;
+      }
+
+      const html = this.buildAchievementToastHtml(def);
+      const dataUrl = `data:text/html,${encodeURIComponent(html)}`;
+
+      const toast = new WebviewWindow(`achievement-toast-${Date.now()}`, {
+        url: dataUrl,
+        title: "成就",
+        width: toastWidth,
+        height: toastHeight,
+        x,
+        y,
+        visible: true,
+        decorations: false,
+        transparent: true,
+        alwaysOnTop: true,
+        skipTaskbar: true,
+        resizable: false,
+        maximizable: false,
+        minimizable: false,
+        focus: false,
+        shadow: false
+      });
+
+      this.achievementWindow = toast;
+
+      // Auto-dismiss after 3.2 seconds
+      window.clearTimeout(this.achievementToastTimer);
+      this.achievementToastTimer = window.setTimeout(() => {
+        void toast.close();
+        if (this.achievementWindow === toast) {
+          this.achievementWindow = null;
+        }
+      }, 3200);
+    } catch (error) {
+      console.warn("Failed to show achievement toast", error);
+    }
+  }
+
+  private buildAchievementToastHtml(def: AchievementDef): string {
+    return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+      *{margin:0;padding:0;box-sizing:border-box}
+      html,body{width:100%;height:100%;background:transparent;overflow:hidden;
+        font-family:system-ui,sans-serif;display:grid;place-items:center}
+      .toast{display:flex;align-items:center;gap:10px;padding:10px 18px;
+        background:rgba(42,31,26,.92);color:#fff3da;border-radius:16px;
+        font-size:13px;white-space:nowrap;box-shadow:0 6px 24px rgba(0,0,0,.3);
+        animation:pop-in .35s cubic-bezier(.16,1,.3,1)}
+      .icon{font-size:20px}
+      @keyframes pop-in{0%{opacity:0;transform:scale(.85) translateY(6px)}
+        100%{opacity:1;transform:scale(1) translateY(0)}}
+    </style></head><body>
+      <div class="toast">
+        <span class="icon">${def.icon}</span>
+        <span><b>${def.name}</b>&nbsp;—&nbsp;${def.description}</span>
+      </div>
+    </body></html>`;
   }
 }

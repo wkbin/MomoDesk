@@ -121,6 +121,15 @@ export class CanvasPetRenderer {
     await Promise.all([...this.frameAnimations.values()].map((animation) => animation.ready));
   }
 
+  /** Release all frame animation images to free GPU memory. Call before switching skins. */
+  releaseFrameAnimations(): void {
+    for (const animation of this.frameAnimations.values()) {
+      animation.frames.length = 0;
+      animation.lastReadyFrame = null;
+    }
+    this.frameAnimations.clear();
+  }
+
   hasFrameAnimation(state: AnimationKey): boolean {
     const animation = this.getFrameAnimationForKey(state).animation;
     return Boolean(animation?.frames.length);

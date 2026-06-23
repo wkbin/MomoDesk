@@ -2,19 +2,27 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { currentMonitor, getCurrentWindow, LogicalSize, PhysicalPosition } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-import type { ChatResponse, ChatMessage } from "../types/chat";
+import type { ChatMessage } from "../types/chat";
 import type { Settings } from "../types/pet";
 import { DEFAULT_SETTINGS } from "../config/settings";
 import { recordPetEvent } from "./petEvents";
+import { incrementCondition } from "./achievements";
+import { readStoredMood } from "./mood";
 
 const TAURI_AVAILABLE = "__TAURI_INTERNALS__" in window;
 /** Max conversation turns to retain for context (backend uses last 6) */
 const MAX_RECENT_MESSAGES = 6;
+const CHAT_HISTORY_KEY = "momodesk:chat-history";
 const CHAT_WINDOW_WIDTH = 218;
 const CHAT_INPUT_HEIGHT = 64;
 const CHAT_REPLY_HEIGHT = 128;
 const CHAT_MEMORY_HEIGHT = 156;
 const CHAT_WINDOW_GAP = 14;
+
+interface ChatStreamToken {
+  token: string;
+  done: boolean;
+}
 
 export class MomoChatOverlay {
   private readonly root: HTMLElement;
@@ -39,6 +47,7 @@ export class MomoChatOverlay {
     this.root = document.createElement("section");
     this.root.className = "momo-chat-inline";
     this.root.style.display = "none";
+    this.loadChatHistory();
 
     // Reply bubble — shown above the input when AI responds
     this.replyBubble = document.createElement("div");
@@ -163,25 +172,66 @@ export class MomoChatOverlay {
     this.inputEl.value = "";
     this.inputEl.placeholder = "...";
     recordPetEvent({ type: "chat_message" });
+    incrementCondition("chat_count");
     this.syncBusyState();
+    // Show "..." pending state immediately
     await this.showPendingReply();
 
     try {
       const requestMessages = [...this.recentMessages, { role: "user" as const, content: message }];
-      const response = await invoke<ChatResponse>("chat_with_momo", {
+
+      // Start listening for stream tokens before invoking the command
+      let streamedText = "";
+      let streamDone = false;
+      const unlisten = await listen<ChatStreamToken>("chat-token", (event) => {
+        if (streamDone) return;
+        if (event.payload.done) {
+          streamDone = true;
+          return;
+        }
+        streamedText += event.payload.token;
+        // Typewriter update — show tokens as they arrive
+        this.replyTextEl.textContent = streamedText;
+        this.replyBubble.classList.add("momo-chat-reply--visible");
+        this.replyBubble.classList.remove("momo-chat-reply--pending");
+      });
+
+      await invoke("chat_with_momo_stream", {
         message,
         recentMessages: requestMessages,
         settings: this.settings
       });
+
+      // Wait a short grace period for the final "done" event
+      await new Promise<void>((resolve) => {
+        const check = (): void => {
+          if (streamDone) { resolve(); return; }
+          setTimeout(check, 60);
+        };
+        check();
+      });
+
+      unlisten();
+
       // Accumulate context for multi-turn conversation
       this.recentMessages = requestMessages;
-      this.recentMessages.push({ role: "assistant", content: response.reply });
-      // Keep only the last N turns so the array doesn't grow unbounded
+      const reply = streamedText.trim() || "（Momo 没听清）";
+      this.recentMessages.push({ role: "assistant", content: reply });
       if (this.recentMessages.length > MAX_RECENT_MESSAGES * 2) {
         this.recentMessages = this.recentMessages.slice(-MAX_RECENT_MESSAGES * 2);
       }
-      await this.showReply(response.reply);
-      void this.maybeSuggestMemory(message, response.reply);
+      this.saveChatHistory();
+
+      // Finalize display
+      this.replyTextEl.textContent = reply;
+      this.replyBubble.classList.remove("momo-chat-reply--pending");
+      this.replyBubble.classList.add("momo-chat-reply--visible");
+      this.applyMoodStyle();
+      if (this.isStandaloneWindow) {
+        await this.showStandaloneWindow(false);
+      }
+
+      void this.maybeSuggestMemory(message, reply);
     } catch (error) {
       console.warn("Failed to chat with Momo", error);
       this.pending = false;
@@ -200,6 +250,14 @@ export class MomoChatOverlay {
       if (this.shell.style.display !== "none") {
         this.focusInputSoon();
       }
+      // Auto-dismiss after 8 seconds
+      this.replyDismissTimer = window.setTimeout(() => {
+        if (this.isStandaloneWindow) {
+          this.onClose?.();
+        } else {
+          this.replyBubble.classList.remove("momo-chat-reply--visible");
+        }
+      }, 8_000);
     }
   };
 
@@ -490,5 +548,51 @@ export class MomoChatOverlay {
       x: Math.round(x),
       y: Math.round(y)
     };
+  }
+
+  // ── Emotion expression ─────────────────────────────────────────────
+
+  private applyMoodStyle(): void {
+    const mood = readStoredMood();
+    // Remove all mood classes first
+    this.replyBubble.classList.remove(
+      "momo-chat-reply--mood-happy",
+      "momo-chat-reply--mood-calm",
+      "momo-chat-reply--mood-low",
+      "momo-chat-reply--mood-upset"
+    );
+    if (mood.mood >= 75) {
+      this.replyBubble.classList.add("momo-chat-reply--mood-happy");
+    } else if (mood.mood >= 45) {
+      this.replyBubble.classList.add("momo-chat-reply--mood-calm");
+    } else if (mood.mood >= 20) {
+      this.replyBubble.classList.add("momo-chat-reply--mood-low");
+    } else {
+      this.replyBubble.classList.add("momo-chat-reply--mood-upset");
+    }
+  }
+
+  // ── Chat history persistence ───────────────────────────────────────
+
+  private loadChatHistory(): void {
+    try {
+      const raw = window.localStorage.getItem(CHAT_HISTORY_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as ChatMessage[];
+        if (Array.isArray(parsed)) {
+          this.recentMessages = parsed.slice(-MAX_RECENT_MESSAGES * 2);
+        }
+      }
+    } catch {
+      // Corrupt history — start fresh
+    }
+  }
+
+  private saveChatHistory(): void {
+    try {
+      window.localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(this.recentMessages));
+    } catch {
+      // quota exceeded — silently ignore
+    }
   }
 }

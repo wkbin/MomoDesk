@@ -138,6 +138,8 @@ struct ChatCompletionRequest<'a> {
     messages: Vec<OpenAiMessage<'a>>,
     temperature: f32,
     max_tokens: u32,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    stream: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -159,6 +161,31 @@ struct ChatCompletionChoice {
 #[derive(Debug, Deserialize)]
 struct ChatCompletionMessage {
     content: String,
+}
+
+// ── SSE streaming ─────────────────────────────────────────────────
+
+#[derive(Debug, Default, Deserialize)]
+struct StreamDelta {
+    #[serde(default)]
+    content: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct StreamChoice {
+    #[serde(default)]
+    delta: StreamDelta,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamChunk {
+    choices: Vec<StreamChoice>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ChatStreamToken {
+    token: String,
+    done: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,6 +219,7 @@ pub fn run() {
             save_pet_state,
             load_pet_state,
             chat_with_momo,
+            chat_with_momo_stream,
             suggest_memory,
             evaluate_pet_mood,
             generate_proactive_message,
@@ -330,6 +358,7 @@ async fn chat_with_momo(
             messages,
             temperature: 0.9,
             max_tokens: 180,
+            stream: false,
         });
 
     if !settings.api_key.trim().is_empty() {
@@ -352,6 +381,121 @@ async fn chat_with_momo(
         .ok_or_else(|| "模型没有返回可用内容".to_string())?;
 
     Ok(ChatResponse { reply })
+}
+
+#[tauri::command]
+async fn chat_with_momo_stream(
+    app: AppHandle,
+    message: String,
+    recent_messages: Vec<ChatMessage>,
+    settings: Settings,
+) -> Result<(), String> {
+    validate_model_settings(&settings)?;
+
+    let system_prompt = build_system_prompt(&settings);
+    let mut messages = vec![OpenAiMessage {
+        role: "system",
+        content: &system_prompt,
+    }];
+
+    let mut normalized = recent_messages;
+    if normalized.is_empty() {
+        normalized.push(ChatMessage {
+            role: "user".to_string(),
+            content: message,
+        });
+    }
+
+    for item in normalized.iter().rev().take(6).rev() {
+        messages.push(OpenAiMessage {
+            role: if item.role == "assistant" { "assistant" } else { "user" },
+            content: &item.content,
+        });
+    }
+
+    let endpoint = format!(
+        "{}/chat/completions",
+        settings.api_base_url.trim_end_matches('/')
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|err| err.to_string())?;
+
+    let mut request = client
+        .post(&endpoint)
+        .header(CONTENT_TYPE, "application/json")
+        .json(&ChatCompletionRequest {
+            model: &settings.model,
+            messages,
+            temperature: 0.9,
+            max_tokens: 180,
+            stream: true,
+        });
+
+    if !settings.api_key.trim().is_empty() {
+        request = request.header(AUTHORIZATION, format!("Bearer {}", settings.api_key.trim()));
+    }
+
+    let response = request.send().await.map_err(|err| err.to_string())?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("模型接口请求失败（{}）：{}", status, body));
+    }
+
+    // Spawn background task to stream tokens via events
+    tauri::async_runtime::spawn(async move {
+        let mut stream = response.bytes_stream();
+        let mut buf = String::new();
+        let mut done = false;
+
+        use futures_util::StreamExt;
+        while let Some(chunk_result) = stream.next().await {
+            if done {
+                break;
+            }
+            let chunk = match chunk_result {
+                Ok(c) => c,
+                Err(_) => break,
+            };
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+
+            // Process complete SSE lines
+            while let Some(line_end) = buf.find('\n') {
+                let line = buf[..line_end].trim().to_string();
+                buf = buf[line_end + 1..].to_string();
+
+                let data = line.strip_prefix("data: ").unwrap_or(&line);
+                if data.is_empty() || data == "[DONE]" {
+                    if data == "[DONE]" {
+                        done = true;
+                    }
+                    continue;
+                }
+
+                if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
+                    if let Some(token) = chunk.choices.first().map(|c| c.delta.content.clone()) {
+                        if !token.is_empty() {
+                            let _ = app.emit("chat-token", ChatStreamToken {
+                                token,
+                                done: false,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Signal completion
+        let _ = app.emit("chat-token", ChatStreamToken {
+            token: String::new(),
+            done: true,
+        });
+    });
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -708,6 +852,7 @@ async fn request_chat_completion(
             messages,
             temperature,
             max_tokens,
+            stream: false,
         });
 
     if !settings.api_key.trim().is_empty() {

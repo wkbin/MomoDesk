@@ -28,6 +28,18 @@ if (view === "pet-menu") {
     }
   });
   window.setTimeout(() => { blurGrace = true; }, 300);
+} else if (view === "teaser-dot") {
+  // Teaser wand dot — a tiny glowing circle that follows the cursor
+  const canvas = document.querySelector<HTMLCanvasElement>("#pet-canvas");
+  if (canvas) canvas.style.display = "none";
+  document.body.style.cssText = "margin:0;background:transparent;overflow:hidden;display:grid;place-items:center";
+  const dot = document.createElement("div");
+  dot.style.cssText = `
+    width:22px;height:22px;border-radius:50%;
+    background:radial-gradient(circle,#ffeaa7 10%,#fdcb6e 50%,transparent 70%);
+    box-shadow:0 0 14px 3px rgba(253,203,110,.55),0 0 28px 6px rgba(253,203,110,.25);
+  `;
+  document.body.appendChild(dot);
 } else if (view === "settings") {
   void new SettingsView().mount(document.body);
 } else {
@@ -42,3 +54,12 @@ if (view === "pet-menu") {
     console.error("Failed to start MomoDesk", error);
   });
 }
+
+// Global error recovery — log but don't crash
+window.addEventListener("error", (event) => {
+  console.warn("[MomoDesk] unhandled error:", event.error ?? event.message);
+});
+window.addEventListener("unhandledrejection", (event) => {
+  console.warn("[MomoDesk] unhandled rejection:", event.reason);
+  event.preventDefault();
+});
