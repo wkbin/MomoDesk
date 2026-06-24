@@ -439,6 +439,7 @@ export class SettingsView {
     container.className = "settings-group";
 
     container.appendChild(this.buildToggleRow("置顶显示", "alwaysOnTop"));
+    container.appendChild(this.buildToggleRow("开机自启", "autostart"));
     container.appendChild(this.buildToggleRow("启用音效", "soundEnabled"));
     container.appendChild(this.buildToggleRow("主动陪伴气泡", "proactiveBubbleEnabled"));
     container.appendChild(this.buildToggleRow("AI 生成主动话术", "aiProactiveBubbleEnabled"));
@@ -614,6 +615,7 @@ export class SettingsView {
     set("memoryNotes", this.settings.memoryNotes);
     set("customSystemPrompt", this.settings.customSystemPrompt);
     set("alwaysOnTop", this.settings.alwaysOnTop);
+    set("autostart", this.settings.autostart);
     set("soundEnabled", this.settings.soundEnabled);
     set("proactiveBubbleEnabled", this.settings.proactiveBubbleEnabled);
     set("aiProactiveBubbleEnabled", this.settings.aiProactiveBubbleEnabled);
@@ -701,6 +703,7 @@ export class SettingsView {
       memoryNotes: val("memoryNotes").trim(),
       customSystemPrompt: val("customSystemPrompt"),
       alwaysOnTop: checked("alwaysOnTop"),
+      autostart: checked("autostart"),
       soundEnabled: checked("soundEnabled"),
       proactiveBubbleEnabled: checked("proactiveBubbleEnabled"),
       aiProactiveBubbleEnabled: checked("aiProactiveBubbleEnabled"),
@@ -714,7 +717,13 @@ export class SettingsView {
   private async loadSettings(): Promise<Settings> {
     if (!TAURI_AVAILABLE) return DEFAULT_SETTINGS;
     try {
-      return await invoke<Settings>("load_settings");
+      const settings = await invoke<Settings>("load_settings");
+      try {
+        const autostart = await invoke<boolean>("get_autostart");
+        settings.autostart = autostart;
+      } catch {
+      }
+      return settings;
     } catch {
       return DEFAULT_SETTINGS;
     }

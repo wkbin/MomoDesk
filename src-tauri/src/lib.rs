@@ -223,7 +223,9 @@ pub fn run() {
             suggest_memory,
             evaluate_pet_mood,
             generate_proactive_message,
-            set_click_through
+            set_click_through,
+            set_autostart,
+            get_autostart
         ])
         .setup(|app| {
             configure_pet_window(app)?;
@@ -267,6 +269,9 @@ fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     write_json(&app, "settings.json", &settings)?;
     app.emit("settings-updated", &settings)
         .map_err(|err| err.to_string())?;
+    
+    set_autostart(app, settings.autostart)?;
+    
     Ok(())
 }
 
@@ -619,6 +624,69 @@ fn set_click_through(app: AppHandle, ignore: bool) -> Result<(), String> {
             .map_err(|err| err.to_string())?;
     }
     Ok(())
+}
+
+#[tauri::command]
+fn get_autostart() -> Result<bool, String> {
+    let result = std::process::Command::new("reg")
+        .args([
+            "query",
+            "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            "/v",
+            "MomoDesk",
+        ])
+        .status();
+
+    match result {
+        Ok(status) if status.success() => Ok(true),
+        Ok(status) if status.code() == Some(1) => Ok(false),
+        Ok(status) => Err(format!("读取自启状态失败，退出码：{}", status.code().unwrap_or(-1))),
+        Err(err) => Err(format!("读取自启状态失败：{}", err)),
+    }
+}
+
+#[tauri::command]
+fn set_autostart(_app: AppHandle, enable: bool) -> Result<(), String> {
+    let app_exe = std::env::current_exe()
+        .map_err(|err| format!("获取应用路径失败：{}", err))?;
+    let app_path_str = app_exe.to_string_lossy().to_string();
+
+    if enable {
+        let result = std::process::Command::new("reg")
+            .args([
+                "add",
+                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                "/v",
+                "MomoDesk",
+                "/d",
+                &format!("\"{}\"", app_path_str),
+                "/f",
+            ])
+            .status();
+
+        match result {
+            Ok(status) if status.success() => Ok(()),
+            Ok(status) => Err(format!("设置自启失败，退出码：{}", status.code().unwrap_or(-1))),
+            Err(err) => Err(format!("设置自启失败：{}", err)),
+        }
+    } else {
+        let result = std::process::Command::new("reg")
+            .args([
+                "delete",
+                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                "/v",
+                "MomoDesk",
+                "/f",
+            ])
+            .status();
+
+        match result {
+            Ok(status) if status.success() => Ok(()),
+            Ok(status) if status.code() == Some(1) => Ok(()),
+            Ok(status) => Err(format!("取消自启失败，退出码：{}", status.code().unwrap_or(-1))),
+            Err(err) => Err(format!("取消自启失败：{}", err)),
+        }
+    }
 }
 
 fn configure_pet_window(app: &mut tauri::App) -> tauri::Result<()> {
