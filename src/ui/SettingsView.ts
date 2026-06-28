@@ -17,6 +17,13 @@ import {
   type PetEventStats,
   summarizePetEvents
 } from "./petEvents";
+import {
+  generateTimeline,
+  renderDiaryTimeline,
+  renderDiaryStats
+} from "./diary";
+import type { DiaryTimeline } from "./diary";
+import { getAchievementState, getAllAchievements } from "./achievements";
 
 const TAURI_AVAILABLE = "__TAURI_INTERNALS__" in window;
 
@@ -50,13 +57,30 @@ export class SettingsView {
   private readonly metricBars = new Map<string, { barEl: HTMLDivElement; valueEl: HTMLSpanElement }>();
   private eventStats: PetEventStats = summarizePetEvents();
   private statValueEls: Partial<Record<keyof PetEventStats | "moodTrend" | "aiMood", HTMLSpanElement>> = {};
+  private diaryTimeline: DiaryTimeline = generateTimeline(7);
+  private diaryDaysRange = 7;
+  private diaryTimelineContainer: HTMLDivElement | null = null;
+  private diaryStatsContainer: HTMLDivElement | null = null;
+  private diaryPeriodSelect: HTMLSelectElement | null = null;
+  private achievementProgressEl: HTMLSpanElement | null = null;
+  private initialCategory: string | null = null;
 
   async mount(target: HTMLElement): Promise<void> {
     document.body.classList.add("settings-window");
     this.settings = await this.loadSettings();
+
+    // Deep-link: support opening to a specific tab via ?tab=diary
+    const tabParam = new URL(window.location.href).searchParams.get("tab");
+    if (tabParam && this.getCategories().some(c => c.id === tabParam)) {
+      this.initialCategory = tabParam;
+    }
+
     target.replaceChildren(this.buildView());
     this.bindFormValues();
     this.bindEvents();
+
+    // Apply initial category after the view is built (defaults to "status")
+    this.setActiveCategory(this.initialCategory ?? this.activeCategory);
   }
 
   private buildView(): HTMLElement {
@@ -134,7 +158,6 @@ export class SettingsView {
     shell.appendChild(actions);
 
     this.formEl = form;
-    this.setActiveCategory(this.activeCategory);
     return form;
   }
 
@@ -145,6 +168,12 @@ export class SettingsView {
         label: "状态",
         description: "查看桌宠现在的心情和行为倾向。",
         buildContent: () => this.buildStatusContent()
+      },
+      {
+        id: "diary",
+        label: "日记",
+        description: "查看陪伴记录和时间线。",
+        buildContent: () => this.buildDiaryContent()
       },
       {
         id: "model",
@@ -234,9 +263,12 @@ export class SettingsView {
     const speedLine = this.buildProfileLine("成长速度");
     this.growthSpeedEl = speedLine.valueEl;
     footer.appendChild(speedLine.row);
-    const companionLine = this.buildProfileLine("陪伴");
+    const companionLine = this.buildProfileLine("陪伴时长");
     this.companionshipEl = companionLine.valueEl;
     footer.appendChild(companionLine.row);
+    const achievementLine = this.buildProfileLine("成就");
+    this.achievementProgressEl = achievementLine.valueEl;
+    footer.appendChild(achievementLine.row);
     const stateLine = this.buildProfileLine("状态");
     this.petStateEl = stateLine.valueEl;
     this.petStateEl.className = "settings-pet-profile__state";
@@ -467,6 +499,73 @@ export class SettingsView {
     return container;
   }
 
+  private buildDiaryContent(): HTMLElement {
+    const container = document.createElement("div");
+    container.className = "settings-group";
+
+    // ── Stats summary ──
+    const statsSection = document.createElement("section");
+    statsSection.className = "settings-diary-section";
+    const statsTitle = document.createElement("h3");
+    statsTitle.textContent = "📊 陪伴统计";
+    statsSection.appendChild(statsTitle);
+
+    this.diaryStatsContainer = document.createElement("div");
+    this.diaryStatsContainer.innerHTML = renderDiaryStats(this.diaryTimeline);
+    statsSection.appendChild(this.diaryStatsContainer);
+    container.appendChild(statsSection);
+
+    // ── Timeline with period selector ──
+    const timelineSection = document.createElement("section");
+    timelineSection.className = "settings-diary-section";
+
+    const timelineHeader = document.createElement("div");
+    timelineHeader.className = "settings-diary-timeline-header";
+
+    const timelineTitle = document.createElement("h3");
+    timelineTitle.textContent = "📅 陪伴时间线";
+    timelineHeader.appendChild(timelineTitle);
+
+    this.diaryPeriodSelect = document.createElement("select");
+    this.diaryPeriodSelect.className = "settings-select diary-period-select";
+    const periods = [
+      { value: "7", label: "最近 7 天" },
+      { value: "14", label: "最近 14 天" },
+      { value: "30", label: "最近 30 天" }
+    ];
+    for (const p of periods) {
+      const opt = document.createElement("option");
+      opt.value = p.value;
+      opt.textContent = p.label;
+      this.diaryPeriodSelect.appendChild(opt);
+    }
+    this.diaryPeriodSelect.value = String(this.diaryDaysRange);
+    this.diaryPeriodSelect.addEventListener("change", () => this.refreshDiary());
+    timelineHeader.appendChild(this.diaryPeriodSelect);
+
+    timelineSection.appendChild(timelineHeader);
+
+    this.diaryTimelineContainer = document.createElement("div");
+    this.diaryTimelineContainer.innerHTML = renderDiaryTimeline(this.diaryTimeline);
+    timelineSection.appendChild(this.diaryTimelineContainer);
+
+    container.appendChild(timelineSection);
+
+    return container;
+  }
+
+  private refreshDiary(): void {
+    const days = parseInt(this.diaryPeriodSelect?.value ?? "7", 10);
+    this.diaryDaysRange = days;
+    this.diaryTimeline = generateTimeline(days);
+    if (this.diaryStatsContainer) {
+      this.diaryStatsContainer.innerHTML = renderDiaryStats(this.diaryTimeline);
+    }
+    if (this.diaryTimelineContainer) {
+      this.diaryTimelineContainer.innerHTML = renderDiaryTimeline(this.diaryTimeline);
+    }
+  }
+
   // ─── Row builders ───
 
   private buildInputRow(
@@ -645,6 +744,14 @@ export class SettingsView {
         this.renderMoodStatus();
         this.setStatus("已同步最新设置。");
       });
+
+      void listen<{ category: string }>("settings-navigate", (event) => {
+        const { category } = event.payload;
+        const categories = this.getCategories();
+        if (categories.some(c => c.id === category)) {
+          this.setActiveCategory(category);
+        }
+      });
     }
 
     window.addEventListener(MOOD_UPDATED_EVENT, this.onMoodUpdated);
@@ -782,7 +889,19 @@ export class SettingsView {
       this.growthSpeedEl.textContent = mood.growthSpeed === null ? "待记录" : `${mood.growthSpeed}/小时`;
     }
     if (this.companionshipEl) {
-      this.companionshipEl.textContent = `本机记录 ${mood.ageHours}小时`;
+      const ageHours = mood.ageHours;
+      const days = Math.floor(ageHours / 24);
+      const hours = ageHours % 24;
+      if (days > 0) {
+        this.companionshipEl.textContent = `${days} 天 ${hours} 小时`;
+      } else {
+        this.companionshipEl.textContent = `${hours} 小时`;
+      }
+    }
+    if (this.achievementProgressEl) {
+      const state = getAchievementState();
+      const all = getAllAchievements();
+      this.achievementProgressEl.textContent = `${state.unlocked.length} / ${all.length}`;
     }
     if (this.petStateEl) {
       this.petStateEl.textContent = `${mood.stateLabel} · ${mood.label}`;
@@ -861,6 +980,11 @@ export class SettingsView {
     this.categorySections.forEach((section, id) => {
       section.hidden = id !== active.id;
     });
+
+    // Auto-refresh diary data when navigating to diary tab
+    if (categoryId === "diary") {
+      this.refreshDiary();
+    }
 
     if (this.paneTitleEl) {
       this.paneTitleEl.textContent = active.label;

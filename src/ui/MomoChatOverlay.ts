@@ -203,13 +203,20 @@ export class MomoChatOverlay {
       });
 
       // Wait a short grace period for the final "done" event
-      await new Promise<void>((resolve) => {
-        const check = (): void => {
-          if (streamDone) { resolve(); return; }
-          setTimeout(check, 60);
-        };
-        check();
-      });
+      // Time out after 12s to avoid getting stuck if the backend stream hangs
+      const STREAM_COMPLETION_TIMEOUT_MS = 12_000;
+      await Promise.race([
+        new Promise<void>((resolve) => {
+          const check = (): void => {
+            if (streamDone) { resolve(); return; }
+            setTimeout(check, 60);
+          };
+          check();
+        }),
+        new Promise<void>((resolve) => {
+          setTimeout(resolve, STREAM_COMPLETION_TIMEOUT_MS);
+        })
+      ]);
 
       unlisten();
 

@@ -523,6 +523,10 @@ export class MomoDeskApp {
       void this.openSettingsWindow();
     });
 
+    void window.listen("tray-diary", () => {
+      void this.openSettingsWindow("diary");
+    });
+
     void window.listen("tray-quit", () => {
       void this.savePetState();
       window.close();
@@ -1237,25 +1241,39 @@ export class MomoDeskApp {
     return url.href;
   }
 
-  private async openSettingsWindow(): Promise<void> {
+  private async openSettingsWindow(tab?: string): Promise<void> {
     if (!TAURI_AVAILABLE) {
       return;
     }
 
-    const settingsWindow = await this.getOrCreateSettingsWindow();
+    if (this.settingsWindow) {
+      // Window already exists — emit navigation event to switch tab, then show/focus
+      if (tab) {
+        await emitTo("settings", "settings-navigate", { category: tab }).catch(() => {});
+      }
+      await this.settingsWindow.show();
+      await this.settingsWindow.setFocus();
+      return;
+    }
+
+    const settingsWindow = await this.getOrCreateSettingsWindow(tab);
     await settingsWindow.show();
     await settingsWindow.setFocus();
   }
 
-  private async getOrCreateSettingsWindow(): Promise<WebviewWindow> {
+  private async getOrCreateSettingsWindow(tab?: string): Promise<WebviewWindow> {
     const existing = this.settingsWindow ?? (await WebviewWindow.getByLabel("settings"));
     if (existing) {
       this.settingsWindow = existing;
+      // Navigate to the requested tab when recovering a stale window reference
+      if (tab) {
+        await emitTo("settings", "settings-navigate", { category: tab }).catch(() => {});
+      }
       return existing;
     }
 
     const settingsWindow = new WebviewWindow("settings", {
-      url: this.getSettingsWindowUrl(),
+      url: this.getSettingsWindowUrl(tab),
       title: `${this.getPetName()} 设置`,
       width: SETTINGS_WINDOW_WIDTH,
       height: SETTINGS_WINDOW_HEIGHT,
@@ -1288,9 +1306,9 @@ export class MomoDeskApp {
     return settingsWindow;
   }
 
-  private getSettingsWindowUrl(): string {
+  private getSettingsWindowUrl(tab?: string): string {
     const url = new URL(window.location.href);
-    url.search = "view=settings";
+    url.search = tab ? `view=settings&tab=${encodeURIComponent(tab)}` : "view=settings";
     url.hash = "";
     return url.href;
   }

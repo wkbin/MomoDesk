@@ -50,7 +50,7 @@ export function generateDiaryEntry(date: Date): DiaryEntry {
     return Number.isFinite(ts) && ts >= dayStart.getTime() && ts <= dayEnd.getTime();
   });
 
-  const stats = summarizePetEvents(events, dayEnd);
+  const stats = summarizePetEvents(dayEvents, dayEnd);
 
   // Mood samples for the day
   const moodSamples = dayEvents

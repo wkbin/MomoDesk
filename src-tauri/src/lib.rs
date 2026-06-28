@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use tauri::window::Color;
@@ -11,23 +13,35 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Settings {
+    #[serde(default)]
     autostart: bool,
+    #[serde(default = "default_true")]
     sound_enabled: bool,
+    #[serde(default = "default_active_level")]
     active_level: String,
+    #[serde(default = "default_scale")]
     scale: f64,
+    #[serde(default = "default_true")]
     always_on_top: bool,
+    #[serde(default = "default_skin_id")]
     skin_id: String,
+    #[serde(default = "default_llm_provider")]
     llm_provider: String,
+    #[serde(default = "default_api_base_url")]
     api_base_url: String,
+    #[serde(default)]
     api_key: String,
+    #[serde(default = "default_model")]
     model: String,
     #[serde(default = "default_pet_name")]
     pet_name: String,
+    #[serde(default = "default_persona_preset")]
     persona_preset: String,
     #[serde(default = "default_true")]
     memory_enabled: bool,
     #[serde(default)]
     memory_notes: String,
+    #[serde(default)]
     custom_system_prompt: String,
     #[serde(default)]
     ai_mood_calibration_enabled: bool,
@@ -68,6 +82,34 @@ fn default_true() -> bool {
 
 fn default_pet_name() -> String {
     "Momo".to_string()
+}
+
+fn default_active_level() -> String {
+    "normal".to_string()
+}
+
+fn default_scale() -> f64 {
+    1.0
+}
+
+fn default_skin_id() -> String {
+    "default".to_string()
+}
+
+fn default_llm_provider() -> String {
+    "deepseek".to_string()
+}
+
+fn default_api_base_url() -> String {
+    "https://api.deepseek.com/v1".to_string()
+}
+
+fn default_model() -> String {
+    "deepseek-chat".to_string()
+}
+
+fn default_persona_preset() -> String {
+    "tsundere".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,11 +250,16 @@ fn default_mood() -> f64 {
     50.0
 }
 
+/// Tracks the active chat stream so we can cancel it when a new one starts.
+#[derive(Default)]
+struct StreamState(Mutex<Option<Arc<AtomicBool>>>);
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .manage(StreamState::default())
         .invoke_handler(tauri::generate_handler![
             save_settings,
             load_settings,
@@ -281,7 +328,11 @@ fn load_settings(app: AppHandle) -> Result<Settings, String> {
         if err.kind() == std::io::ErrorKind::NotFound {
             Ok(Settings::default())
         } else {
-            Err(err.to_string())
+            // Corrupted file — delete it so the next save starts fresh
+            if let Ok(app_data_dir) = app.path().app_data_dir() {
+                let _ = std::fs::remove_file(app_data_dir.join("settings.json"));
+            }
+            Ok(Settings::default())
         }
     })
 }
@@ -391,6 +442,7 @@ async fn chat_with_momo(
 #[tauri::command]
 async fn chat_with_momo_stream(
     app: AppHandle,
+    stream_state: tauri::State<'_, StreamState>,
     message: String,
     recent_messages: Vec<ChatMessage>,
     settings: Settings,
@@ -450,16 +502,25 @@ async fn chat_with_momo_stream(
         return Err(format!("模型接口请求失败（{}）：{}", status, body));
     }
 
+    // Cancel any previous stream so tokens don't interleave
+    let cancel_token = Arc::new(AtomicBool::new(false));
+    if let Ok(mut guard) = stream_state.0.lock() {
+        if let Some(prev) = guard.take() {
+            prev.store(true, Ordering::Relaxed);
+        }
+        *guard = Some(cancel_token.clone());
+    }
+
     // Spawn background task to stream tokens via events
     tauri::async_runtime::spawn(async move {
         let mut stream = response.bytes_stream();
         let mut buf = String::new();
-        let mut done = false;
 
         use futures_util::StreamExt;
         while let Some(chunk_result) = stream.next().await {
-            if done {
-                break;
+            // Honour cancellation (newer stream started)
+            if cancel_token.load(Ordering::Relaxed) {
+                return;
             }
             let chunk = match chunk_result {
                 Ok(c) => c,
@@ -472,12 +533,20 @@ async fn chat_with_momo_stream(
                 let line = buf[..line_end].trim().to_string();
                 buf = buf[line_end + 1..].to_string();
 
-                let data = line.strip_prefix("data: ").unwrap_or(&line);
-                if data.is_empty() || data == "[DONE]" {
-                    if data == "[DONE]" {
-                        done = true;
-                    }
+                // SSE spec allows "data:" or "data: " — handle both
+                let data = line
+                    .strip_prefix("data:")
+                    .map(|s| s.strip_prefix(' ').unwrap_or(s))
+                    .unwrap_or(&line);
+                if data.is_empty() {
                     continue;
+                }
+                if data == "[DONE]" {
+                    let _ = app.emit("chat-token", ChatStreamToken {
+                        token: String::new(),
+                        done: true,
+                    });
+                    return;
                 }
 
                 if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
@@ -493,7 +562,7 @@ async fn chat_with_momo_stream(
             }
         }
 
-        // Signal completion
+        // Signal completion (stream ended without explicit [DONE])
         let _ = app.emit("chat-token", ChatStreamToken {
             token: String::new(),
             done: true,
@@ -711,8 +780,14 @@ fn write_json<T: Serialize>(app: &AppHandle, file_name: &str, value: &T) -> Resu
     std::fs::create_dir_all(&app_data_dir).map_err(|err| err.to_string())?;
 
     let path = app_data_dir.join(file_name);
+    let tmp_path = app_data_dir.join(format!(".{}.tmp", file_name));
     let json = serde_json::to_string_pretty(value).map_err(|err| err.to_string())?;
-    std::fs::write(path, json).map_err(|err| err.to_string())
+    // Atomic write: write to temp file, then rename
+    std::fs::write(&tmp_path, json).map_err(|err| err.to_string())?;
+    std::fs::rename(&tmp_path, &path).map_err(|err| {
+        let _ = std::fs::remove_file(&tmp_path);
+        err.to_string()
+    })
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(
@@ -724,9 +799,13 @@ fn read_json<T: serde::de::DeserializeOwned>(
         .app_data_dir()
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?
         .join(file_name);
-    let contents = std::fs::read_to_string(path)?;
+    let contents = std::fs::read_to_string(&path).map_err(|err| {
+        // If the file exists but can't be read (corrupted or permissions),
+        // map to a specific error so callers can decide to delete and recover.
+        err
+    })?;
     serde_json::from_str(&contents)
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
 }
 
 fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
@@ -734,6 +813,7 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let show_item = MenuItem::with_id(app, "show", "显示 Momo", true, None::<&str>)?;
     let hide_item = MenuItem::with_id(app, "hide", "隐藏 Momo", true, None::<&str>)?;
     let settings_item = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
+    let diary_item = MenuItem::with_id(app, "diary", "陪伴日记", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "退出 MomoDesk", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
@@ -742,6 +822,7 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
             &hide_item,
             &recall_item,
             &settings_item,
+            &diary_item,
             &quit_item,
         ],
     )?;
@@ -779,6 +860,12 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
             if let Some(window) = app.get_webview_window("pet") {
                 show_pet_window(&window, false);
                 let _ = window.emit("tray-settings", ());
+            }
+        }
+        "diary" => {
+            if let Some(window) = app.get_webview_window("pet") {
+                show_pet_window(&window, false);
+                let _ = window.emit("tray-diary", ());
             }
         }
         "quit" => {
